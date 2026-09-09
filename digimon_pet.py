@@ -162,8 +162,6 @@ MON2 = (1920, 0, 1920, 1080)
 
 PET_W = 300
 PET_H = 230
-WALK_HOLD = 0.34
-IDLE_HOLD = 0.72
 WALK_BOB_HZ = 3.2
 WALK_BOB_PX = 4.0
 HUD_W = 284
@@ -601,7 +599,6 @@ class DigimonPet:
             if path.exists():
                 self.obs_ims[spec["id"]] = binary_rgba(Image.open(path).convert("RGBA"))
         self.eat_id = "meat"
-        self._poses: dict[tuple[str, str], list[Image.Image]] = {}
         self.save = load_state()
         self.anim = "idle"
         self.facing = 1
@@ -988,39 +985,20 @@ class DigimonPet:
             return False, " ".join(missing[:2])
         return True, "READY"
 
-    def _pose_frames(self, form: str, kind: str) -> list[Image.Image]:
-        key = (form, kind)
-        hit = self._poses.get(key)
-        if hit is not None:
-            return hit
-        names: list[str] = []
-        for i in range(1, 8):
-            n = f"{form}_{kind}_{i:02d}.png"
-            if (SPRITES / n).exists():
-                names.append(n)
-        solo = f"{form}_{kind}.png"
-        if not names and (SPRITES / solo).exists():
-            names.append(solo)
-        frames = [load_rgba(n) for n in names]
-        self._poses[key] = frames
-        return frames
-
     def body(self, h: int) -> Image.Image:
         form = self.form()
         anim = self.anim
-        kind = {
-            "walk": "walk",
-            "idle": "idle",
-            "eat": "eat",
-            "sleep": "sleep",
-            "happy": "happy",
-            "play": "happy",
-            "hungry": "hungry",
-        }.get(anim, "")
-        frames = self._pose_frames(form, kind) if kind else []
-        if frames:
-            hold = WALK_HOLD if anim == "walk" else IDLE_HOLD
-            im = frames[int(time.time() / hold) % len(frames)].copy()
+        extra = ""
+        if anim in ("happy", "play"):
+            extra = f"{form}_happy.png"
+        elif anim == "hungry":
+            extra = f"{form}_hungry.png"
+        elif anim == "sleep":
+            extra = f"{form}_sleep.png"
+        elif anim == "eat":
+            extra = f"{form}_eat.png"
+        if extra and (SPRITES / extra).exists():
+            im = load_rgba(extra).copy()
         else:
             im = self.forms[form].copy()
         im = fit_h(im, h)
