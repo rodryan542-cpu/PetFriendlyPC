@@ -162,6 +162,10 @@ MON2 = (1920, 0, 1920, 1080)
 
 PET_W = 300
 PET_H = 230
+WALK_HOLD = 0.34
+IDLE_HOLD = 0.72
+WALK_BOB_HZ = 3.2
+WALK_BOB_PX = 4.0
 HUD_W = 284
 HUD_H = 166
 PROP_W = 96
@@ -597,6 +601,7 @@ class DigimonPet:
             if path.exists():
                 self.obs_ims[spec["id"]] = binary_rgba(Image.open(path).convert("RGBA"))
         self.eat_id = "meat"
+        self._poses: dict[tuple[str, str], list[Image.Image]] = {}
         self.save = load_state()
         self.anim = "idle"
         self.facing = 1
@@ -983,8 +988,42 @@ class DigimonPet:
             return False, " ".join(missing[:2])
         return True, "READY"
 
+    def _pose_frames(self, form: str, kind: str) -> list[Image.Image]:
+        key = (form, kind)
+        hit = self._poses.get(key)
+        if hit is not None:
+            return hit
+        names: list[str] = []
+        for i in range(1, 8):
+            n = f"{form}_{kind}_{i:02d}.png"
+            if (SPRITES / n).exists():
+                names.append(n)
+        solo = f"{form}_{kind}.png"
+        if not names and (SPRITES / solo).exists():
+            names.append(solo)
+        frames = [load_rgba(n) for n in names]
+        self._poses[key] = frames
+        return frames
+
     def body(self, h: int) -> Image.Image:
-        im = fit_h(self.forms[self.form()].copy(), h)
+        form = self.form()
+        anim = self.anim
+        kind = {
+            "walk": "walk",
+            "idle": "idle",
+            "eat": "eat",
+            "sleep": "sleep",
+            "happy": "happy",
+            "play": "happy",
+            "hungry": "hungry",
+        }.get(anim, "")
+        frames = self._pose_frames(form, kind) if kind else []
+        if frames:
+            hold = WALK_HOLD if anim == "walk" else IDLE_HOLD
+            im = frames[int(time.time() / hold) % len(frames)].copy()
+        else:
+            im = self.forms[form].copy()
+        im = fit_h(im, h)
         if self.facing < 0:
             im = im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         return self._with_gear_dirt(im)
@@ -1044,15 +1083,15 @@ class DigimonPet:
             elif anim == "hungry":
                 squash = 1.0 + 0.014 * math.sin(t * 2.0)
             elif anim == "walk":
-                bob = abs(math.sin(t * 8.2)) * 8
-                rot = math.sin(t * 8.2) * 3.0
+                bob = abs(math.sin(t * WALK_BOB_HZ)) * WALK_BOB_PX
+                rot = math.sin(t * WALK_BOB_HZ) * 1.2
             elif anim in ("happy", "play", "evo"):
-                bob = abs(math.sin(t * 10.0)) * 14
+                bob = abs(math.sin(t * 4.0)) * 8
             elif anim == "train":
-                shake = int(math.sin(t * 18.0) * 5)
-                bob = abs(math.sin(t * 11.0)) * 5
+                shake = int(math.sin(t * 6.0) * 2)
+                bob = abs(math.sin(t * 4.4)) * 3
             elif anim == "eat":
-                squash = 1.04 + 0.03 * math.sin(t * 12.0)
+                squash = 1.04 + 0.02 * math.sin(t * 5.0)
             if rot:
                 im = im.rotate(rot, expand=True, resample=Image.Resampling.NEAREST)
             nh = max(8, int(im.height * squash))
@@ -1323,8 +1362,8 @@ class DigimonPet:
         if self.foe_facing < 0:
             im = im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         t = time.time()
-        bob = abs(math.sin(t * 8.2)) * 8
-        rot = math.sin(t * 8.2) * 3.0
+        bob = abs(math.sin(t * WALK_BOB_HZ)) * WALK_BOB_PX
+        rot = math.sin(t * WALK_BOB_HZ) * 1.2
         im = im.rotate(rot, expand=True, resample=Image.Resampling.NEAREST)
         x = (PET_W - im.width) // 2
         y = PET_H - im.height - 6 - int(bob)
@@ -2013,7 +2052,7 @@ class DigimonPet:
         mx, my, mw, mh = MON2
         if self.anim == "walk" and not self.p()["sleeping"] and not self.showering:
             mood = self.p()["mood"]
-            speed = 78 if self.exploring else (20 + mood * 0.24)
+            speed = 32 if self.exploring else (12 + mood * 0.10)
             if mood < 30:
                 speed *= 0.55
             self.x += speed * dt * self.facing
