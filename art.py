@@ -926,6 +926,9 @@ def build_pets() -> None:
     SPRITES.mkdir(parents=True, exist_ok=True)
     for spec in GEN_FORMS:
         dest = SPRITES / f"{spec['id']}.png"
+        # Hand-drawn / generated portraits are much larger than the 2KB blobs.
+        if dest.exists() and dest.stat().st_size >= 8000:
+            continue
         scale_nn(
             pet_sprite(spec["kind"], spec["c0"], spec["c1"], spec.get("stage", 0), spec.get("mark", "dot")),
             5,
