@@ -67,7 +67,7 @@ RUN_OBS = (
 
 LEVEL_MAX = 30
 INBOX_MAX = 40
-GEAR_PER_PAGE = 8
+GEAR_PER_PAGE = 4
 
 
 def xp_need(level: int) -> int:

@@ -52,6 +52,7 @@ from game_data import (
     player_hp,
     power_of,
     shop_cost,
+    blast_typ_for_enemy,
 )
 
 
@@ -752,7 +753,6 @@ def _fight_use(pet, mid: str) -> None:
     p["hunger"] = max(0, p["hunger"] - 3)
     if hit["miss"]:
         f["log"] = f"{mv['name'].upper()}  MISS"
-        pet.pop("MISS", (180, 180, 180))
     else:
         f["ehp"] = max(0, f["ehp"] - hit["dmg"])
         tag = " CRIT" if hit["crit"] else ""
@@ -760,18 +760,21 @@ def _fight_use(pet, mid: str) -> None:
             f["status"] = hit["status"]
             tag += f" {hit['status'].upper()}"
         f["log"] = f"{mv['name'].upper()}  {hit['dmg']}{tag}"
-        pet.pop(str(hit["dmg"]), (255, 220, 80) if not hit["crit"] else (255, 80, 80))
     if f["ehp"] <= 0:
+        pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""))
         _fight_win(pet, e)
         return
     if f.get("status") == "burn":
         f["ehp"] = max(0, f["ehp"] - 3)
     dmg_in = enemy_hit(e, stats, f.get("status") or "")
+    counter = None
     if dmg_in <= 0:
         f["log"] += "  STUNNED"
     else:
         f["php"] = max(0, f["php"] - dmg_in)
         f["log"] += f"  /  {e['name']} {dmg_in}"
+        counter = {"typ": blast_typ_for_enemy(e), "dmg": int(dmg_in), "label": e["name"]}
+    pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""), counter=counter)
     if f["php"] <= 0:
         _fight_lose(pet, e)
         return
@@ -1448,8 +1451,8 @@ def _floor_use(pet, mid: str) -> None:
         if hit["status"]:
             fl["status"] = hit["status"]
         fl["log"] = f"{mv['name'].upper()} {hit['dmg']}" + (" CRIT" if hit["crit"] else "")
-        pet.pop(str(hit["dmg"]), (255, 220, 80))
     if fl["ehp"] <= 0:
+        pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""))
         loot = random.randint(8, 16) + int(fl.get("n") or 1) * 4
         pet.save["coins"] = int(pet.save.get("coins", 0)) + loot
         grant_xp(p, 10 + int(fl.get("n") or 1) * 6)
@@ -1468,8 +1471,12 @@ def _floor_use(pet, mid: str) -> None:
         pet.persist()
         return
     dmg_in = enemy_hit(e, stats, fl.get("status") or "")
+    counter = None
     fl["php"] = max(0, fl["php"] - dmg_in)
     fl["log"] += f"  / {dmg_in}"
+    if dmg_in > 0:
+        counter = {"typ": blast_typ_for_enemy(e), "dmg": int(dmg_in), "label": str(e.get("name") or "HIT")}
+    pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""), counter=counter)
     if fl["php"] <= 0:
         fl["over"] = True
         pet.save["streak"] = 0

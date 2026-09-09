@@ -346,6 +346,36 @@ TYPE_COLOR = {
     "leaf": (70, 170, 70),
 }
 
+FOE_BLAST = {
+    "flame": "fire",
+    "plant": "leaf",
+    "ghost": "curse",
+    "serpent": "water",
+    "dino": "fire",
+    "wing": "wind",
+    "beetle": "leaf",
+    "bird": "wind",
+    "fish": "water",
+    "skull": "dark",
+    "grunt": "gun",
+    "soldier": "gun",
+    "armor": "strike",
+    "drone": "shock",
+    "fly": "wind",
+    "blob": "curse",
+    "ape": "strike",
+    "brute": "strike",
+    "agent": "dark",
+    "clown": "curse",
+    "slug": "leaf",
+    "beast": "slash",
+    "elite": "holy",
+}
+
+
+def blast_typ_for_enemy(e: dict) -> str:
+    return FOE_BLAST.get(str((e or {}).get("shape") or ""), "strike")
+
 EGGS = frozenset(ln["stages"][0] for ln in LINES)
 
 

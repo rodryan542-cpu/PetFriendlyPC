@@ -414,6 +414,44 @@ def enemy_sprite(shape: str, c0, c1) -> Image.Image:
     return im
 
 
+def tint_shape(im: Image.Image, c0, c1) -> Image.Image:
+    import numpy as np
+
+    arr = np.array(im.convert("RGBA"))
+    r = arr[:, :, 0].astype(np.float32)
+    g = arr[:, :, 1].astype(np.float32)
+    b = arr[:, :, 2].astype(np.float32)
+    a = arr[:, :, 3]
+    lum = 0.30 * r + 0.59 * g + 0.11 * b
+    glow = (r > 200) & (g > 170) & (b < 140)
+    outline = lum < 40
+    keep = (a < 16) | outline | glow
+    t = np.clip((lum - 40.0) / 175.0, 0.0, 1.0)
+    nr = c1[0] + (c0[0] - c1[0]) * t
+    ng = c1[1] + (c0[1] - c1[1]) * t
+    nb = c1[2] + (c0[2] - c1[2]) * t
+    nr = nr * 0.72 + r * 0.28
+    ng = ng * 0.72 + g * 0.28
+    nb = nb * 0.72 + b * 0.28
+    m = (~keep) & (a >= 16)
+    out = arr.copy()
+    out[m, 0] = np.clip(nr[m], 0, 255).astype(np.uint8)
+    out[m, 1] = np.clip(ng[m], 0, 255).astype(np.uint8)
+    out[m, 2] = np.clip(nb[m], 0, 255).astype(np.uint8)
+    gone = out[:, :, 3] < 16
+    out[gone, 0:3] = 0
+    out[gone, 3] = 0
+    out[~gone, 3] = 255
+    return Image.fromarray(out, "RGBA")
+
+
+def _enemy_png(shape: str, c0, c1) -> Image.Image:
+    tmpl = UI / f"shape_{shape}.png"
+    if tmpl.exists() and tmpl.stat().st_size >= 8000:
+        return tint_shape(Image.open(tmpl), c0, c1)
+    return scale_nn(enemy_sprite(shape, c0, c1), 3)
+
+
 def move_icon(typ: str) -> Image.Image:
     im = _new(32, 32, (0, 0, 0, 0))
     c = TYPE_COLOR.get(typ, (200, 200, 200))
@@ -541,6 +579,15 @@ def crest_icon(name: str) -> Image.Image:
     return im
 
 
+def _keep_png(dest: Path, maker) -> Image.Image:
+    if dest.exists() and dest.stat().st_size >= 8000:
+        return Image.open(dest).convert("RGBA")
+    im = maker()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    im.save(dest)
+    return im
+
+
 def build_all() -> Path:
     UI.mkdir(parents=True, exist_ok=True)
     rooms = {
@@ -561,19 +608,21 @@ def build_all() -> Path:
     for typ in seen_types:
         scale_nn(move_icon(typ), 2).save(UI / f"type_{typ}.png")
     for e in ENEMIES:
-        scale_nn(enemy_sprite(e["shape"], e["c0"], e["c1"]), 2).save(UI / f"enemy_{e['id']}.png")
+        _enemy_png(e["shape"], e["c0"], e["c1"]).save(UI / f"enemy_{e['id']}.png")
     for h in HATCH:
-        scale_nn(hatch_icon(h["id"]), 2).save(UI / f"hatch_{h['id']}.png")
+        _keep_png(UI / f"hatch_{h['id']}.png", lambda hid=h["id"]: scale_nn(hatch_icon(hid), 3))
     for c in CLAN_CRESTS:
         scale_nn(crest_icon(c), 2).save(UI / f"crest_{c}.png")
     for it in ITEMS:
-        scale_nn(item_icon(it["id"], it["kind"]), 2).save(UI / f"item_{it['id']}.png")
+        item = _keep_png(UI / f"item_{it['id']}.png", lambda iid=it["id"], k=it["kind"]: scale_nn(item_icon(iid, k), 3))
         if it["kind"] == "food":
-            food = scale_nn(food_sprite(it["id"]), 2)
-            food.save(UI / f"food_{it['id']}.png")
+            food = _keep_png(UI / f"food_{it['id']}.png", lambda im=item: im.copy())
             food.save(SPRITES / f"food_{it['id']}.png")
     for a in ATTACHMENTS:
-        scale_nn(attach_sprite(a["id"], a["slot"]), 2).save(UI / f"gear_{a['id']}.png")
+        _keep_png(UI / f"gear_{a['id']}.png", lambda aid=a["id"], slot=a["slot"]: scale_nn(attach_sprite(aid, slot), 3))
+    for typ in TYPE_COLOR:
+        _keep_png(UI / f"blast_{typ}.png", lambda t=typ: scale_nn(move_icon(t), 5))
+    _keep_png(UI / "blast_boom.png", lambda: scale_nn(move_icon("fire"), 5))
     for spec in RUN_OBS:
         scale_nn(run_obs_sprite(spec["id"]), 2).save(UI / f"run_{spec['id']}.png")
     scale_nn(run_ground(), 2).save(UI / "run_ground.png")
@@ -584,7 +633,7 @@ def build_all() -> Path:
     scale_nn(raid_tile(), 3).save(UI / "raid_floor.png")
     scale_nn(raid_sky(), 3).save(UI / "raid_sky.png")
     for b in RAID_BOSSES:
-        scale_nn(enemy_sprite(b["shape"], b["c0"], b["c1"]), 3).save(UI / f"boss_{b['id']}.png")
+        _enemy_png(b["shape"], b["c0"], b["c1"]).save(UI / f"boss_{b['id']}.png")
     build_pets()
     return UI
 

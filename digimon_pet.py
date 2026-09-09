@@ -42,6 +42,8 @@ from game_data import (
     owns_line,
     power_of,
     shop_cost,
+    TYPE_COLOR,
+    blast_typ_for_enemy,
 )
 from handlers import give_item, handle, net_event
 from panels import PW, PH, GameUI
@@ -169,6 +171,8 @@ HUD_H = 166
 PROP_W = 96
 PROP_H = 96
 PROP_N = 3
+BLAST_W = 168
+BLAST_H = 168
 KEY = (0, 253, 253)
 KEY_HEX = "#00fdfd"
 
@@ -519,6 +523,17 @@ def fit_h(im: Image.Image, h: int) -> Image.Image:
     return im.resize((nw, h), Image.Resampling.NEAREST)
 
 
+def flash_tint(im: Image.Image, rgb, amt: float) -> Image.Image:
+    arr = np.array(im.convert("RGBA"))
+    m = arr[:, :, 3] >= 16
+    amt = max(0.0, min(1.0, float(amt)))
+    for i in range(3):
+        ch = arr[:, :, i].astype(np.float32)
+        ch[m] = ch[m] * (1.0 - amt) + rgb[i] * amt
+        arr[:, :, i] = np.clip(ch, 0, 255).astype(np.uint8)
+    return Image.fromarray(arr, "RGBA")
+
+
 def key_fill(im: Image.Image) -> Image.Image:
     arr = np.array(im)
     empty = arr[:, :, 3] == 0
@@ -598,6 +613,13 @@ class DigimonPet:
             path = UI / f"run_{spec['id']}.png"
             if path.exists():
                 self.obs_ims[spec["id"]] = binary_rgba(Image.open(path).convert("RGBA"))
+        self.blast_ims = {}
+        for typ in TYPE_COLOR:
+            path = UI / f"blast_{typ}.png"
+            if path.exists():
+                self.blast_ims[typ] = binary_rgba(Image.open(path).convert("RGBA"))
+        boom = UI / "blast_boom.png"
+        self.boom_im = binary_rgba(Image.open(boom).convert("RGBA")) if boom.exists() else None
         self.eat_id = "meat"
         self.save = load_state()
         self.anim = "idle"
@@ -621,6 +643,12 @@ class DigimonPet:
         self.exploring = False
         self.fighting = False
         self.fx: list[dict] = []
+        self.foe_fx: list[dict] = []
+        self.blast_job: dict | None = None
+        self.pet_lunge_until = 0.0
+        self.pet_flash_until = 0.0
+        self.foe_shake_until = 0.0
+        self.foe_flash_until = 0.0
         self._foe = ""
         self._place = ""
         self.hits: list[tuple[str, tuple[int, int, int, int]]] = []
@@ -629,6 +657,7 @@ class DigimonPet:
         self.f_lcd = font(13, True)
         self.f_tiny = font(11, True)
         self.f_btn = font(11, True)
+        self.f_pop = font(18, True)
 
         mx, my, mw, mh = MON2
         self.hud_x = float(mx + (mw - HUD_W) // 2)
@@ -680,6 +709,10 @@ class DigimonPet:
         self.foe = tk.Toplevel(self.root)
         self._chrome(self.foe)
         self.foe.geometry(f"{PET_W}x{PET_H}+{-4000}+{-4000}")
+        self.blast = tk.Toplevel(self.root)
+        self._chrome(self.blast)
+        self.blast.geometry(f"{BLAST_W}x{BLAST_H}+{-4000}+{-4000}")
+        self.blast_hwnd = 0
         for _ in range(PROP_N):
             win = tk.Toplevel(self.root)
             self._chrome(win)
@@ -708,17 +741,20 @@ class DigimonPet:
         self.hud.update_idletasks()
         self.panel.update_idletasks()
         self.foe.update_idletasks()
+        self.blast.update_idletasks()
         for win in self.props:
             win.update_idletasks()
         self.pet_hwnd = hwnd_of(self.root)
         self.hud_hwnd = hwnd_of(self.hud)
         self.panel_hwnd = hwnd_of(self.panel)
         self.foe_hwnd = hwnd_of(self.foe)
+        self.blast_hwnd = hwnd_of(self.blast)
         self.prop_hwnds = [hwnd_of(win) for win in self.props]
         make_layered(self.pet_hwnd)
         make_layered(self.hud_hwnd)
         make_layered(self.panel_hwnd)
         make_layered(self.foe_hwnd)
+        make_layered(self.blast_hwnd)
         for hwnd in self.prop_hwnds:
             make_layered(hwnd)
         self.root.bind("<space>", self.on_field_space)
@@ -828,16 +864,18 @@ class DigimonPet:
         self.lcd_flash = msg
         self.lcd_until = time.time() + 2.4
 
-    def pop(self, text: str, color: tuple[int, int, int] = (255, 220, 80), kind: str = "text") -> None:
-        self.fx.append(
+    def pop(self, text: str, color: tuple[int, int, int] = (255, 220, 80), kind: str = "text", where: str = "pet") -> None:
+        bag = self.foe_fx if where == "foe" else self.fx
+        bag.append(
             {
                 "text": text,
                 "x": PET_W // 2 + random.randint(-36, 28),
-                "y": 70 + random.randint(-16, 20),
+                "y": 48 + random.randint(-10, 16),
                 "born": time.time(),
                 "color": color,
-                "vy": -48 - random.randint(0, 18),
+                "vy": -56 - random.randint(0, 18),
                 "kind": kind,
+                "crit": kind == "crit",
             }
         )
 
@@ -1012,20 +1050,20 @@ class DigimonPet:
         gear = gear_of(p)
         back = gear.get("back") or ""
         if back and back in self.gear_ims:
-            g = fit_h(self.gear_ims[back].copy(), max(18, h // 3))
+            g = fit_h(self.gear_ims[back].copy(), max(28, h // 2))
             im.paste(g, (max(0, w // 2 - g.width // 2 - 8), max(0, h // 3 - 4)), g)
         head = gear.get("head") or ""
         if head and head in self.gear_ims:
-            g = fit_h(self.gear_ims[head].copy(), max(16, h // 4))
+            g = fit_h(self.gear_ims[head].copy(), max(24, h // 3))
             im.paste(g, (max(0, w // 2 - g.width // 2), 2), g)
         held = gear.get("held") or ""
         if held and held in self.gear_ims:
-            g = fit_h(self.gear_ims[held].copy(), max(14, h // 5))
+            g = fit_h(self.gear_ims[held].copy(), max(22, h // 4))
             hx = w - g.width - 2 if self.facing >= 0 else 2
             im.paste(g, (hx, h // 2), g)
         feet = gear.get("feet") or ""
         if feet and feet in self.gear_ims:
-            g = fit_h(self.gear_ims[feet].copy(), max(12, h // 6))
+            g = fit_h(self.gear_ims[feet].copy(), max(20, h // 5))
             im.paste(g, (max(0, w // 2 - g.width // 2), h - g.height - 2), g)
         n = dirt_count(int(p.get("hygiene") or 80))
         if n:
@@ -1070,40 +1108,57 @@ class DigimonPet:
                 bob = abs(math.sin(t * 4.4)) * 3
             elif anim == "eat":
                 squash = 1.04 + 0.02 * math.sin(t * 5.0)
+            if t < self.pet_flash_until:
+                im = flash_tint(im, (255, 90, 70), 0.42)
             if rot:
                 im = im.rotate(rot, expand=True, resample=Image.Resampling.NEAREST)
             nh = max(8, int(im.height * squash))
             im = im.resize((im.width, nh), Image.Resampling.NEAREST)
-            x = (PET_W - im.width) // 2 + shake
+            lunge = 0
+            if t < self.pet_lunge_until:
+                lunge = 22 if self.facing > 0 else -22
+            x = (PET_W - im.width) // 2 + shake + lunge
             y = PET_H - im.height - 6 - int(bob)
             canvas.paste(im, (x, y), im)
             if anim == "eat":
                 food = self.food_ims.get(getattr(self, "eat_id", "meat")) or self.meat_im
-                m = fit_h(food.copy(), 28)
+                m = fit_h(food.copy(), 88)
                 canvas.paste(m, (x + im.width - 8, y + im.height // 3), m)
             if p["poop"]:
                 po = fit_h(self.poop_im.copy(), 26)
                 canvas.paste(po, (12, PET_H - po.height - 2), po)
-        self._draw_fx(canvas, t)
+        hp = self._combat_hp()
+        if hp:
+            self._paint_hp(canvas, hp[0], hp[1], 8, (80, 210, 90))
+        self._draw_fx(canvas, t, self.fx)
         return canvas
 
-    def _draw_fx(self, canvas: Image.Image, t: float) -> None:
+    def _draw_fx(self, canvas: Image.Image, t: float, bag: list[dict] | None = None) -> None:
         keep: list[dict] = []
         d = ImageDraw.Draw(canvas)
-        for f in self.fx:
+        src = self.fx if bag is None else bag
+        for f in src:
             age = t - float(f["born"])
-            if age > 1.7:
+            if age > 1.5:
                 continue
-            fade = max(0, min(255, int(255 * (1.0 - age / 1.7))))
+            fade = max(0, min(255, int(255 * (1.0 - age / 1.5))))
             x = int(f["x"])
             y = int(f["y"] + float(f["vy"]) * age)
             col = tuple(f["color"]) + (fade,)
+            ink = (8, 8, 10, fade)
             if f.get("kind") == "heart":
                 d.text((x, y), "♥", font=self.f_lcd, fill=col)
             else:
-                d.text((x, y), str(f["text"]), font=self.f_tiny, fill=col)
+                txt = str(f["text"])
+                face = self.f_pop if f.get("crit") or f.get("kind") == "crit" else self.f_lcd
+                for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1)):
+                    d.text((x + ox, y + oy), txt, font=face, fill=ink)
+                d.text((x, y), txt, font=face, fill=col)
             keep.append(f)
-        self.fx = keep
+        if bag is self.foe_fx:
+            self.foe_fx = keep
+        else:
+            self.fx = keep
 
     def _draw_bed(self, canvas: Image.Image) -> None:
         bed = fit_h(self.bed.copy(), 150)
@@ -1165,23 +1220,32 @@ class DigimonPet:
             tw = d.textlength(tag, font=self.f_tiny)
             d.text((HUD_W - 12 - tw, 12), tag, font=self.f_tiny, fill=LCD_DIM)
 
-            def meter(label: str, val: float, y: int):
+            def meter(label: str, val: float, y: int, fillc=LCD_FG):
                 d.text((14, y), label, font=self.f_tiny, fill=LCD_DIM)
                 x0, x1, by = 40, 156, y + 4
                 d.rectangle((x0, by, x1, by + 5), fill=(4, 10, 6))
                 fill = int((x1 - x0) * max(0, min(100, val)) / 100)
                 if fill:
-                    d.rectangle((x0, by, x0 + fill, by + 5), fill=LCD_FG)
+                    d.rectangle((x0, by, x0 + fill, by + 5), fill=fillc)
 
-            meter("FD", p["hunger"], 28)
-            meter("MD", p["mood"], 40)
-            extra = "DIRT" if int(p.get("hygiene") or 80) < 50 else ("POOP" if p["poop"] else ("ZZZ" if p["sleeping"] else evo_txt))
-            col = (220, 210, 70) if ready else LCD_DIM
-            streak = int(self.save.get("streak") or 0)
-            st_txt = f"ST {int(p['strength']):02d}" + (f" x{streak}" if streak >= 2 else "")
-            d.text((164, 28), st_txt, font=self.f_tiny, fill=LCD_FG)
-            d.text((164, 40), f"${int(self.save.get('coins', 0))} {extra[:6]}", font=self.f_tiny, fill=col)
-            d.text((164, 52), f"HY {int(p.get('hygiene') or 0)} Lv{int(p.get('level') or 1)}", font=self.f_tiny, fill=LCD_DIM)
+            hp = self._combat_hp() if self._combat_live() else None
+            if hp:
+                php, pmax, ehp, emax = hp
+                meter("ME", 100.0 * php / max(1, pmax), 28, (80, 210, 90))
+                meter("FO", 100.0 * ehp / max(1, emax), 40, (220, 70, 60))
+                d.text((164, 28), f"{php}/{pmax}", font=self.f_tiny, fill=LCD_FG)
+                d.text((164, 40), f"{ehp}/{emax}", font=self.f_tiny, fill=(220, 140, 90))
+                d.text((164, 52), self.foe_name[:10].upper(), font=self.f_tiny, fill=LCD_DIM)
+            else:
+                meter("FD", p["hunger"], 28)
+                meter("MD", p["mood"], 40)
+                extra = "DIRT" if int(p.get("hygiene") or 80) < 50 else ("POOP" if p["poop"] else ("ZZZ" if p["sleeping"] else evo_txt))
+                col = (220, 210, 70) if ready else LCD_DIM
+                streak = int(self.save.get("streak") or 0)
+                st_txt = f"ST {int(p['strength']):02d}" + (f" x{streak}" if streak >= 2 else "")
+                d.text((164, 28), st_txt, font=self.f_tiny, fill=LCD_FG)
+                d.text((164, 40), f"${int(self.save.get('coins', 0))} {extra[:6]}", font=self.f_tiny, fill=col)
+                d.text((164, 52), f"HY {int(p.get('hygiene') or 0)} Lv{int(p.get('level') or 1)}", font=self.f_tiny, fill=LCD_DIM)
             qline = f"Q {q.get('label', '—')} {int(q.get('have') or 0)}/{int(q.get('need') or 1)}"
             d.text((14, 54), qline[:22], font=self.f_tiny, fill=(70, 190, 100))
 
@@ -1232,9 +1296,13 @@ class DigimonPet:
                 row3 = (("bed", "BED"), ("shower", "WASH"), ("feed", "FEED"), ("train", "TRN"))
             elif self._combat_live():
                 moves = self._hud_moves()
-                row1 = [(f"atk:{mid}", lab) for mid, lab in moves]
+                row1 = []
+                for mid, lab, typ in moves:
+                    c = TYPE_COLOR.get(typ, BTN)
+                    face = (max(28, c[0] // 2), max(28, c[1] // 2), max(28, c[2] // 2))
+                    row1.append((f"atk:{mid}", lab, face))
                 while len(row1) < 4:
-                    row1.append(("atk:struggle", "STRUG"))
+                    row1.append(("atk:struggle", "STRUG", (90, 70, 40)))
                 row1 = row1[:4]
                 row2 = (("fight", "FLEE"), ("shop", "SHOP"), ("hatch", "HATCH"), ("menu", "MENU"))
                 row3 = (("bed", "BED"), ("shower", "WASH"), ("swap", "SWAP"), ("help", "HELP"))
@@ -1245,9 +1313,13 @@ class DigimonPet:
             gap, bw, bh = 4, 64, 20
             for r, items in enumerate((row1, row2, row3)):
                 y0 = 78 + r * (bh + 4)
-                for c, (key, label) in enumerate(items):
+                for c, item in enumerate(items):
+                    key, label = item[0], item[1]
                     x0 = 8 + c * (bw + gap)
-                    face = (70, 86, 52) if key in ("shop", "menu", "hatch", "fight") else BTN
+                    if len(item) > 2:
+                        face = item[2]
+                    else:
+                        face = (70, 86, 52) if key in ("shop", "menu", "hatch", "fight") else BTN
                     bevel(d, (x0, y0, x0 + bw, y0 + bh), face, BTN_HI, BTN_SH)
                     tw = d.textlength(label, font=self.f_btn)
                     d.text((x0 + (bw - tw) / 2, y0 + 3), label, font=self.f_btn, fill=INK)
@@ -1267,6 +1339,7 @@ class DigimonPet:
                 blank = Image.new("RGBA", (PW, PH), (0, 0, 0, 0))
                 update_layered(self.panel_hwnd, blank, -4000, -4000)
         self._blit_foe()
+        self._blit_blast()
         self._blit_props()
 
     def set_anim(self, name: str, hold: float = 0.0) -> None:
@@ -1289,14 +1362,14 @@ class DigimonPet:
             return True
         return False
 
-    def _hud_moves(self) -> list[tuple[str, str]]:
+    def _hud_moves(self) -> list[tuple[str, str, str]]:
         load = [m for m in (self.p().get("loadout") or []) if m][:4]
         if not load:
-            return [("struggle", "STRUG")]
+            return [("struggle", "STRUG", "strike")]
         out = []
         for mid in load:
             mv = move_by_id(self.save["current"], mid)
-            out.append((mid, ((mv or {}).get("name") or mid)[:6].upper()))
+            out.append((mid, ((mv or {}).get("name") or mid)[:6].upper(), str((mv or {}).get("typ") or "strike")))
         return out
 
     def _combat_atk(self, mid: str) -> None:
@@ -1330,22 +1403,177 @@ class DigimonPet:
         self.foe_facing = -1
         self.foe_name = str(enemy.get("name") or "FOE")
         self.combat_over_at = 0.0
+        self.blast_job = None
         self.flash(f"VS {self.foe_name.upper()[:16]}")
+
+    def _combat_hp(self) -> tuple[int, int, int, int] | None:
+        f = self.ui.fight
+        if f:
+            return int(f.get("php") or 0), max(1, int(f.get("pmax") or 1)), int(f.get("ehp") or 0), max(1, int(f.get("emax") or 1))
+        if self.field_mode == "raid" and self.field_state:
+            st = self.field_state
+            return int(st.get("php") or 0), max(1, int(st.get("pmax") or 1)), int(st.get("ehp") or 0), max(1, int(st.get("emax") or 1))
+        fl = getattr(self.ui, "floor", None)
+        if self.field_mode == "floor" and fl:
+            return int(fl.get("php") or 0), max(1, int(fl.get("pmax") or 1)), int(fl.get("ehp") or 0), max(1, int(fl.get("emax") or 1))
+        return None
+
+    def _paint_hp(self, canvas: Image.Image, hp: int, mx: int, y: int, col) -> None:
+        d = ImageDraw.Draw(canvas)
+        x0, x1 = 46, PET_W - 46
+        d.rectangle((x0, y, x1, y + 10), fill=(16, 12, 14, 230), outline=(8, 8, 10))
+        frac = max(0.0, min(1.0, float(hp) / max(1, mx)))
+        w = int((x1 - x0 - 2) * frac)
+        if w:
+            fill = col if frac > 0.32 else (220, 70, 50)
+            d.rectangle((x0 + 1, y + 1, x0 + 1 + w, y + 9), fill=fill)
+
+    def play_blast(self, typ: str, *, dmg: int = 0, crit: bool = False, miss: bool = False, inbound: bool = False, label: str = "", counter: dict | None = None) -> None:
+        typ = str(typ or "strike")
+        now = time.time()
+        self.blast_job = {
+            "typ": typ,
+            "t0": now,
+            "fly": 0.22 if miss else 0.26,
+            "boom": 0.0 if miss else 0.34,
+            "inbound": inbound,
+            "miss": miss,
+            "crit": crit,
+            "dmg": int(dmg or 0),
+            "label": label,
+            "hit": False,
+            "counter": counter,
+        }
+        if inbound:
+            self.flash((label or "HIT")[:16].upper())
+        else:
+            self.pet_lunge_until = now + 0.28
+            self.set_anim("train", 0.4)
+            self.flash((label or typ)[:16].upper())
+
+    def _blast_ends(self) -> tuple[float, float, float, float]:
+        sx = self.x + PET_W / 2
+        sy = self.y + PET_H * 0.42
+        tx = self.foe_x + PET_W / 2
+        ty = self.foe_y + PET_H * 0.42
+        job = self.blast_job or {}
+        if job.get("inbound"):
+            sx, sy, tx, ty = tx, ty, sx, sy
+        if job.get("miss"):
+            side = 1.0 if tx >= sx else -1.0
+            tx += 160 * side
+            ty -= 18
+        return sx, sy, tx, ty
+
+    def _tick_blast(self) -> None:
+        job = self.blast_job
+        if not job:
+            return
+        now = time.time()
+        age = now - float(job["t0"])
+        fly = float(job["fly"])
+        boom = float(job["boom"])
+        if age >= fly and not job.get("hit"):
+            job["hit"] = True
+            inbound = bool(job.get("inbound"))
+            if job.get("miss"):
+                self.pop("MISS", (190, 190, 200), where="pet" if inbound else "foe")
+            else:
+                if inbound:
+                    self.pet_flash_until = now + 0.28
+                    if job.get("dmg"):
+                        self.pop(str(job["dmg"]), (255, 90, 90), kind="crit" if job.get("crit") else "text", where="pet")
+                else:
+                    self.foe_shake_until = now + 0.32
+                    self.foe_flash_until = now + 0.28
+                    knock = 16 if self.foe_x > self.x else -16
+                    self.foe_x += knock
+                    if job.get("crit"):
+                        self.pop("CRIT", (255, 80, 70), kind="crit", where="foe")
+                    if job.get("dmg"):
+                        self.pop(str(job["dmg"]), (255, 230, 80) if not job.get("crit") else (255, 90, 70), kind="crit" if job.get("crit") else "text", where="foe")
+        if age >= fly + boom:
+            nxt = job.get("counter")
+            self.blast_job = None
+            if nxt and not nxt.get("done"):
+                nxt["done"] = True
+                self.play_blast(str(nxt.get("typ") or "strike"), dmg=int(nxt.get("dmg") or 0), inbound=True, label=str(nxt.get("label") or "HIT"))
+
+    def render_blast(self) -> Image.Image:
+        canvas = Image.new("RGBA", (BLAST_W, BLAST_H), (0, 0, 0, 0))
+        job = self.blast_job
+        if not job:
+            return canvas
+        now = time.time()
+        age = now - float(job["t0"])
+        fly = float(job["fly"])
+        boom = age >= fly and not job.get("miss")
+        if boom:
+            im = self.boom_im.copy() if self.boom_im else None
+            if im is None:
+                return canvas
+            u = min(1.0, (age - fly) / max(0.08, float(job["boom"])))
+            scale = (1.15 if job.get("crit") else 1.0) * (0.7 + 0.45 * math.sin(min(1.0, u) * math.pi))
+            h = max(40, int(120 * scale))
+            im = im.resize((max(40, int(im.width * h / max(1, im.height))), h), Image.Resampling.LANCZOS)
+        else:
+            im = (self.blast_ims.get(job.get("typ")) or self.blast_ims.get("strike") or self.boom_im)
+            if im is None:
+                return canvas
+            im = im.copy()
+            h = 92 if job.get("miss") else 110
+            im = im.resize((max(32, int(im.width * h / max(1, im.height))), h), Image.Resampling.LANCZOS)
+            sx, sy, tx, ty = self._blast_ends()
+            ang = -math.degrees(math.atan2(ty - sy, tx - sx))
+            im = im.rotate(ang, expand=True, resample=Image.Resampling.BICUBIC)
+        x = (BLAST_W - im.width) // 2
+        y = (BLAST_H - im.height) // 2
+        canvas.paste(im, (x, y), im)
+        return canvas
+
+    def _blit_blast(self) -> None:
+        if not self.blast_hwnd:
+            return
+        job = self.blast_job
+        if not job:
+            blank = Image.new("RGBA", (BLAST_W, BLAST_H), (0, 0, 0, 0))
+            update_layered(self.blast_hwnd, blank, -4000, -4000)
+            return
+        sx, sy, tx, ty = self._blast_ends()
+        age = time.time() - float(job["t0"])
+        fly = float(job["fly"])
+        u = 1.0 if age >= fly else max(0.0, min(1.0, age / max(0.04, fly)))
+        u = u * u * (3 - 2 * u)
+        cx = sx + (tx - sx) * u
+        cy = sy + (ty - sy) * u
+        update_layered(self.blast_hwnd, self.render_blast(), int(cx - BLAST_W / 2), int(cy - BLAST_H / 2))
 
     def render_foe(self) -> Image.Image:
         canvas = Image.new("RGBA", (PET_W, PET_H), (0, 0, 0, 0))
         if not self.foe_on:
             return canvas
-        im = fit_h(self.foe_src.copy(), 150)
+        im = fit_h(self.foe_src.copy(), 170)
         if self.foe_facing < 0:
             im = im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         t = time.time()
-        bob = abs(math.sin(t * WALK_BOB_HZ)) * WALK_BOB_PX
-        rot = math.sin(t * WALK_BOB_HZ) * 1.2
-        im = im.rotate(rot, expand=True, resample=Image.Resampling.NEAREST)
-        x = (PET_W - im.width) // 2
-        y = PET_H - im.height - 6 - int(bob)
+        hp = self._combat_hp()
+        dead = bool(hp and hp[2] <= 0)
+        if dead:
+            im = flash_tint(im, (24, 18, 20), 0.35)
+            im = im.rotate(72, expand=True, resample=Image.Resampling.NEAREST)
+        else:
+            if t < self.foe_flash_until:
+                im = flash_tint(im, (255, 230, 180), 0.5)
+            bob = abs(math.sin(t * WALK_BOB_HZ)) * WALK_BOB_PX
+            rot = math.sin(t * WALK_BOB_HZ) * 1.2
+            im = im.rotate(rot, expand=True, resample=Image.Resampling.NEAREST)
+        shake = int(math.sin(t * 52) * 10) if t < self.foe_shake_until else 0
+        x = (PET_W - im.width) // 2 + shake
+        y = PET_H - im.height - 6 - (0 if dead else int(abs(math.sin(t * WALK_BOB_HZ)) * WALK_BOB_PX))
         canvas.paste(im, (x, y), im)
+        if hp:
+            self._paint_hp(canvas, hp[2], hp[3], 8, (220, 70, 60))
+        self._draw_fx(canvas, t, self.foe_fx)
         return canvas
 
     def _blit_foe(self) -> None:
@@ -1931,29 +2159,34 @@ class DigimonPet:
             if hit["status"]:
                 st["status"] = hit["status"]
             st["log"] = f"{mv['name'].upper()} {hit['dmg']}" + (" CRIT" if hit["crit"] else "")
-            self.pop(str(hit["dmg"]), (255, 220, 80))
             if self.net:
                 self.net.raid_hit(hit["dmg"], self.save.get("player_name") or "You", self.save.get("player_id") or "", st["ehp"], st.get("wave") or 0)
-        self._raid_after_hit(stats)
+        killed = int(st.get("ehp") or 0) <= 0
+        dmg_in = self._raid_after_hit(stats)
+        counter = None
+        if not killed and dmg_in > 0:
+            counter = {"typ": blast_typ_for_enemy(e), "dmg": dmg_in, "label": str(e.get("name") or "HIT")}
+        self.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""), counter=counter)
 
-    def _raid_after_hit(self, stats: dict) -> None:
+    def _raid_after_hit(self, stats: dict) -> int:
         st = self.field_state
         if not st:
-            return
+            return 0
         e = st.get("enemy") or {}
         if int(st.get("ehp") or 0) <= 0:
             st["wave"] = int(st.get("wave") or 0) + 1
             if st["wave"] > 3:
                 self._raid_finish(True)
-                return
+                return 0
             start_raid_wave(self, st)
             e = st.get("enemy") or {}
             self.begin_desktop_fight("raid", e, boss=str(e.get("id") or "").startswith("raid_"))
-            return
+            return 0
         dmg_in = enemy_hit(e, stats, st.get("status") or "")
         st["php"] = max(0, int(st["php"]) - dmg_in)
         if st["php"] <= 0:
             self._raid_finish(False)
+        return int(dmg_in or 0)
 
     def _raid_finish(self, won: bool) -> None:
         st = self.field_state
@@ -2002,6 +2235,7 @@ class DigimonPet:
         self.air = 0.0
         self.air_v = 0.0
         self.foe_on = False
+        self.blast_job = None
         if getattr(self.ui, "fight", None):
             self.ui.fight = None
         if getattr(self.ui, "floor", None):
@@ -2116,6 +2350,7 @@ class DigimonPet:
             elif self.field_mode == "run" and self.field_state and self.field_state.get("over"):
                 self.close_field()
         self._tick_foe(dt)
+        self._tick_blast()
         want = 1.0 if self.panel_open else 0.0
         self.sheet_vis += (want - self.sheet_vis) * min(1.0, dt * 10)
         if abs(self.sheet_vis - want) < 0.012:

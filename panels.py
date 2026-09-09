@@ -112,13 +112,13 @@ def _frame(d, box, fill, hi, sh) -> None:
     d.line([(x0 + 2, y1 - 3), (x1 - 3, y1 - 3)], fill=sh)
 
 
-def _fit(im: Image.Image, mw: int, mh: int) -> Image.Image:
+def _fit(im: Image.Image, mw: int, mh: int, resample=Image.Resampling.NEAREST) -> Image.Image:
     if im.width <= 0 or im.height <= 0:
         return Image.new("RGBA", (8, 8), (0, 0, 0, 0))
     s = min(mw / im.width, mh / im.height)
     nw = max(8, int(im.width * s))
     nh = max(8, int(im.height * s))
-    return im.resize((nw, nh), Image.Resampling.NEAREST)
+    return im.resize((nw, nh), resample)
 
 
 def _paste(dst, src, xy, box=None) -> None:
@@ -431,19 +431,19 @@ class GameUI:
         _clip(d, (244, 78), "Bag items. Gear is the other tab.", F_SMALL, DIM, 340)
         self._btn(d, (600, 74, 744, 102), f"{page + 1}/{pages}", "shop_next")
         for i, it in enumerate(chunk):
-            col, row = i % 4, i // 4
-            x0 = 16 + col * 184
-            y0 = 114 + row * 130
-            _frame(d, (x0, y0, x0 + 176, y0 + 122), FACE2, GOLD_DK, EDGE)
-            _paste(n, _load(f"item_{it['id']}.png"), (x0 + 8, y0 + 8), (32, 32))
-            _clip(d, (x0 + 46, y0 + 8), it["name"], F_SMALL, GOLD, 122)
-            _clip(d, (x0 + 8, y0 + 44), f"{fmt_price_short(shop_cost(it['cost']))}  {item_blurb(it)}", F_SMALL, INK, 160)
+            x0 = 12 + i * 186
+            y0 = 108
+            _frame(d, (x0, y0, x0 + 178, y0 + 268), FACE2, GOLD_DK, EDGE)
+            icon = _fit(_load(f"item_{it['id']}.png"), 160, 160, Image.Resampling.LANCZOS)
+            _paste(n, icon, (x0 + (178 - icon.width) // 2, y0 + 8))
+            _clip(d, (x0 + 8, y0 + 172), it["name"], F_BODY, GOLD, 162)
+            _clip(d, (x0 + 8, y0 + 194), f"{fmt_price_short(shop_cost(it['cost']))}  {item_blurb(it)}", F_SMALL, INK, 162)
             have = int((pet.save.get("bag") or {}).get(it["id"]) or 0)
             if have:
-                _clip(d, (x0 + 8, y0 + 64), f"owned x{have}", F_SMALL, GREEN, 160)
-            self._btn(d, (x0 + 8, y0 + 86, x0 + 84, y0 + 114), "BUY", f"buyitem:{it['id']}")
+                _clip(d, (x0 + 8, y0 + 214), f"owned x{have}", F_SMALL, GREEN, 162)
+            self._btn(d, (x0 + 8, y0 + 234, x0 + 86, y0 + 260), "BUY", f"buyitem:{it['id']}")
             if have:
-                self._btn(d, (x0 + 90, y0 + 86, x0 + 168, y0 + 114), "USE", f"useitem:{it['id']}")
+                self._btn(d, (x0 + 92, y0 + 234, x0 + 170, y0 + 260), "USE", f"useitem:{it['id']}")
         bag = pet.save.get("bag") or {}
         held = [f"{ITEM_BY_ID.get(k, {}).get('name', k)} x{v}" for k, v in bag.items() if int(v) > 0]
         _clip(d, (16, 384), ("Bag: " + ", ".join(held)) if held else "Bag empty — buy, GO, or win a fight.", F_SMALL, INK, 728)
@@ -457,20 +457,20 @@ class GameUI:
         self._btn(d, (600, 74, 744, 102), f"{page + 1}/{pages}", "gear_next")
         _clip(d, (244, 78), "Fits every partner. Equip a slot.", F_SMALL, DIM, 340)
         for i, a in enumerate(chunk):
-            col, row = i % 4, i // 4
-            x0 = 16 + col * 184
-            y0 = 114 + row * 130
+            x0 = 12 + i * 186
+            y0 = 108
             on = worn.get(a["slot"]) == a["id"]
-            _frame(d, (x0, y0, x0 + 176, y0 + 122), (40, 48, 28) if on else FACE2, GOLD if on else GOLD_DK, EDGE)
-            _paste(n, _load(f"gear_{a['id']}.png"), (x0 + 8, y0 + 8), (40, 40))
-            _clip(d, (x0 + 54, y0 + 8), a["name"], F_SMALL, GOLD, 114)
-            _clip(d, (x0 + 8, y0 + 50), f"{fmt_price_short(shop_cost(a['cost']))}  {a['slot']}  {a['blurb']}", F_SMALL, INK, 160)
+            _frame(d, (x0, y0, x0 + 178, y0 + 268), (40, 48, 28) if on else FACE2, GOLD if on else GOLD_DK, EDGE)
+            icon = _fit(_load(f"gear_{a['id']}.png"), 160, 160, Image.Resampling.LANCZOS)
+            _paste(n, icon, (x0 + (178 - icon.width) // 2, y0 + 8))
+            _clip(d, (x0 + 8, y0 + 172), a["name"], F_BODY, GOLD, 162)
+            _clip(d, (x0 + 8, y0 + 194), f"{fmt_price_short(shop_cost(a['cost']))}  {a['slot']}  {a['blurb']}", F_SMALL, INK, 162)
             have = int(bag.get(a["id"]) or 0)
             if have:
-                _clip(d, (x0 + 8, y0 + 68), f"owned x{have}", F_SMALL, GREEN, 160)
-            self._btn(d, (x0 + 8, y0 + 86, x0 + 84, y0 + 114), "BUY", f"buygear:{a['id']}")
+                _clip(d, (x0 + 8, y0 + 214), f"owned x{have}", F_SMALL, GREEN, 162)
+            self._btn(d, (x0 + 8, y0 + 234, x0 + 86, y0 + 260), "BUY", f"buygear:{a['id']}")
             if have or on:
-                self._btn(d, (x0 + 90, y0 + 86, x0 + 168, y0 + 114), "WEAR" if not on else "OFF", f"wear:{a['id']}")
+                self._btn(d, (x0 + 92, y0 + 234, x0 + 170, y0 + 260), "WEAR" if not on else "OFF", f"wear:{a['id']}")
         eq = "  ".join(f"{s}:{ATTACH_BY_ID.get(v, {}).get('name', '—') if v else '—'}" for s, v in worn.items())
         _clip(d, (16, 388), eq[:90], F_SMALL, GREEN, 728)
 
@@ -553,21 +553,21 @@ class GameUI:
         pages = max(1, (len(HATCH) + HATCH_PER_PAGE - 1) // HATCH_PER_PAGE)
         self._btn(d, (16, 388, 140, 414), f"{page + 1}/{pages}", "hatch_next")
         spr = _fit(_sprite(pet, pet.form()), 88, 88)
-        _paste(n, spr, (24, 140))
-        _wrap(d, (24, 236), "Warm eggs make tools cut more.", F_SMALL, DIM, 90, 3)
+        _paste(n, spr, (16, 140))
+        _wrap(d, (16, 236), "Warm eggs make tools cut more.", F_SMALL, DIM, 100, 3)
         for ni, h in enumerate(chunk):
-            x0 = 128 + ni * 122
-            y0 = 136
-            _frame(d, (x0, y0, x0 + 114, y0 + 250), FACE2, GOLD_DK, EDGE)
-            _paste(n, _load(f"hatch_{h['id']}.png"), (x0 + 8, y0 + 10), (36, 36))
-            _clip(d, (x0 + 8, y0 + 52), h["name"], F_BODY, GOLD, 98)
-            _clip(d, (x0 + 8, y0 + 80), f"{fmt_price_short(shop_cost(h['cost']))}", F_SMALL, INK, 98)
-            _clip(d, (x0 + 8, y0 + 102), f"-{h['shave'] // 60} min", F_SMALL, GREEN, 98)
-            _wrap(d, (x0 + 8, y0 + 124), h.get("desc", ""), F_SMALL, DIM, 98, 3)
+            x0 = 126 + ni * 156
+            y0 = 132
+            _frame(d, (x0, y0, x0 + 148, y0 + 246), FACE2, GOLD_DK, EDGE)
+            icon = _fit(_load(f"hatch_{h['id']}.png"), 120, 120, Image.Resampling.LANCZOS)
+            _paste(n, icon, (x0 + (148 - icon.width) // 2, y0 + 6))
+            _clip(d, (x0 + 8, y0 + 128), h["name"], F_BODY, GOLD, 132)
+            _clip(d, (x0 + 8, y0 + 148), f"{fmt_price_short(shop_cost(h['cost']))}  -{h['shave'] // 60} min", F_SMALL, INK, 132)
+            _wrap(d, (x0 + 8, y0 + 168), h.get("desc", ""), F_SMALL, DIM, 132, 2)
             cd = float((p.get("cd_hatch") or {}).get(h["id"], 0)) - time.time()
             if cd > 0:
-                _clip(d, (x0 + 8, y0 + 186), f"wait {int(cd)}s", F_SMALL, RED, 98)
-            self._btn(d, (x0 + 8, y0 + 210, x0 + 106, y0 + 242), "USE", f"hatch:{h['id']}")
+                _clip(d, (x0 + 8, y0 + 200), f"wait {int(cd)}s", F_SMALL, RED, 132)
+            self._btn(d, (x0 + 8, y0 + 216, x0 + 140, y0 + 242), "USE", f"hatch:{h['id']}")
 
     def _moves(self, n, d, pet) -> None:
         p = pet.p()
@@ -591,11 +591,11 @@ class GameUI:
             x0 = 16 + col * 364
             y0 = 152 + row * 118
             _frame(d, (x0, y0, x0 + 356, y0 + 110), FACE2, GOLD_DK, EDGE)
-            _paste(n, _load(f"move_{m['id']}.png"), (x0 + 10, y0 + 14), (48, 48))
+            _paste(n, _fit(_load(f"move_{m['id']}.png"), 80, 80, Image.Resampling.LANCZOS), (x0 + 10, y0 + 14))
             tcol = TYPE_COLOR.get(m["typ"], INK)
             powr = m["pow"] + max(0, lv - 1) * m["grow"]
-            _clip(d, (x0 + 68, y0 + 10), m["name"], F_BODY, GOLD, 180)
-            _clip(d, (x0 + 68, y0 + 38), f"{m['typ']}  Lv {lv}/{MOVE_MAX}  pow {powr}", F_SMALL, tcol, 200)
+            _clip(d, (x0 + 100, y0 + 10), m["name"], F_BODY, GOLD, 148)
+            _clip(d, (x0 + 100, y0 + 38), f"{m['typ']}  Lv {lv}/{MOVE_MAX}  pow {powr}", F_SMALL, tcol, 168)
             if lv <= 0:
                 self._btn(d, (x0 + 230, y0 + 64, x0 + 344, y0 + 100), f"BUY {fmt_price_short(move_buy_cost(m))}", f"buy:{m['id']}")
             elif lv < MOVE_MAX:
