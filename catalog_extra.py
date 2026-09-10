@@ -1,5 +1,6 @@
 """New roster, moves, items, enemies. Merged by game_data."""
 from more_roster import MORE_FOES, MORE_GEN, MORE_LABELS, MORE_PLACES
+from wave4 import WAVE4_FOES, WAVE4_GEN, WAVE4_LABELS, WAVE4_PLACES
 
 EXTRA_LINES = (
     {"id": "pika", "tag": "POKEMON", "stages": ("egg_pika", "pichu", "pika", "raichu")},
@@ -113,6 +114,7 @@ EXTRA_LABELS = {
     "dragon": "Dragon",
 }
 EXTRA_LABELS.update(MORE_LABELS)
+EXTRA_LABELS.update(WAVE4_LABELS)
 
 EXTRA_FORMS = {k: f"{k}.png" for k in EXTRA_LABELS}
 
@@ -170,7 +172,7 @@ GEN_FORMS = (
     {"id": "egg_dragon", "kind": "egg", "c0": (50, 150, 80), "c1": (220, 180, 50), "mark": "flame", "stage": 0},
     {"id": "wyrm", "kind": "dragon", "c0": (50, 150, 80), "c1": (220, 180, 50), "mark": "flame", "stage": 0},
     {"id": "dragon", "kind": "dragon", "c0": (40, 130, 70), "c1": (220, 180, 50), "mark": "wing", "stage": 2},
-) + MORE_GEN
+) + MORE_GEN + WAVE4_GEN
 
 
 def _m(mid, name, typ, buy, up, pow_, grow):
@@ -475,7 +477,9 @@ EXTRA_FOES = {
     "MYTH": ("Slime", "Wyvern", "Lich"),
 }
 EXTRA_PLACES.update(MORE_PLACES)
+EXTRA_PLACES.update(WAVE4_PLACES)
 EXTRA_FOES.update(MORE_FOES)
+EXTRA_FOES.update(WAVE4_FOES)
 
 STARTER_PER_PAGE = 8
 SHOP_PER_PAGE = 4

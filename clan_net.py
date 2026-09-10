@@ -109,6 +109,21 @@ class ClanNet:
     def chat(self, text: str, from_name: str, from_pid: str) -> None:
         self._broadcast({"t": "chat", "from_name": from_name, "from_pid": from_pid, "text": text[:40]})
 
+    def buddy(self, peer: dict, from_name: str, from_pid: str, main: str) -> None:
+        self.send_peer(peer, {"t": "buddy", "to": peer.get("pid"), "from_pid": from_pid, "from_name": from_name, "main": main})
+
+    def buddy_reply(self, peer: dict, ok: bool, card: dict | None) -> None:
+        self.send_peer(peer, {"t": "buddy_ok" if ok else "buddy_no", "to": peer.get("pid") or peer.get("from_pid"), "card": card or {}})
+
+    def gift(self, peer: dict, coins: int, item: str, from_name: str, from_pid: str) -> None:
+        self.send_peer(peer, {"t": "gift", "to": peer.get("pid"), "coins": int(coins), "item": item, "from_name": from_name, "from_pid": from_pid})
+
+    def visit(self, peer: dict, from_name: str, from_pid: str, yard: int) -> None:
+        self.send_peer(peer, {"t": "visit", "to": peer.get("pid"), "from_name": from_name, "from_pid": from_pid, "yard": int(yard)})
+
+    def whisper(self, peer: dict, text: str, from_name: str, from_pid: str) -> None:
+        self.send_peer(peer, {"t": "whisper", "to": peer.get("pid"), "from_name": from_name, "from_pid": from_pid, "text": text[:40]})
+
     def raid_q(self, queued: bool, from_name: str, from_pid: str, power: int) -> None:
         self._broadcast({"t": "raid_q", "queued": bool(queued), "from_name": from_name, "from_pid": from_pid, "power": int(power)})
 

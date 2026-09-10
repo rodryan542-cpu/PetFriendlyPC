@@ -20,6 +20,15 @@ from more_roster import (
     MORE_MOVES,
     MORE_NAMES,
 )
+from wave4 import (
+    WAVE4_BLURB,
+    WAVE4_ENEMIES,
+    WAVE4_HATCH,
+    WAVE4_ITEMS,
+    WAVE4_LINES,
+    WAVE4_MOVES,
+    WAVE4_NAMES,
+)
 
 LINES = (
     {"id": "agumon", "tag": "DIGIMON", "stages": ("egg_agumon", "botamon", "koromon", "agumon", "greymon")},
@@ -30,7 +39,7 @@ LINES = (
     {"id": "gojo", "tag": "JJK", "stages": ("egg_gojo", "gojo", "gojo2")},
     {"id": "chief", "tag": "HALO", "stages": ("cryo", "chief", "chief_ar", "chief_kit")},
     {"id": "arbiter", "tag": "HALO", "stages": ("egg_arbiter", "arbiter", "arbiter2")},
-) + EXTRA_LINES + MORE_LINES
+) + EXTRA_LINES + MORE_LINES + WAVE4_LINES
 LINE_BY_ID = {ln["id"]: ln for ln in LINES}
 LINE_NAME = {
     "agumon": "Agumon",
@@ -43,6 +52,7 @@ LINE_NAME = {
     "arbiter": "Arbiter",
     **EXTRA_NAMES,
     **MORE_NAMES,
+    **WAVE4_NAMES,
 }
 START_FORM = {ln["id"]: ln["stages"][0] for ln in LINES}
 LINE_PRICE = 2_500_000
@@ -117,6 +127,7 @@ START_BLURB = {
     "arbiter": "Sangheili honor. Energy blade.",
     **EXTRA_BLURB,
     **MORE_BLURB,
+    **WAVE4_BLURB,
 }
 
 MOVE_MAX = 5
@@ -205,7 +216,7 @@ MOVES = {
         {"id": "honor", "name": "Honor Duel", "typ": "slash", "buy": 64, "up": 28, "pow": 35, "grow": 8},
     ),
 }
-MOVES = {**MOVES, **EXTRA_MOVES, **MORE_MOVES}
+MOVES = {**MOVES, **EXTRA_MOVES, **MORE_MOVES, **WAVE4_MOVES}
 
 HATCH = (
     {"id": "warm", "name": "Warm", "cost": 8, "cd": 180, "shave": 12 * 60, "desc": "Hands on the shell. 12 min gone."},
@@ -218,7 +229,7 @@ HATCH = (
     {"id": "incubate", "name": "Incubate", "cost": 35, "cd": 900, "shave": 50 * 60, "desc": "Lock it in. 50 min."},
     {"id": "nest", "name": "Warm Nest", "cost": 48, "cd": 720, "shave": 70 * 60, "desc": "Tuck it in. 70 min."},
     {"id": "comet", "name": "Comet Chew", "cost": 80, "cd": 180, "shave": 90 * 60, "desc": "Eat an hour and a half."},
-)
+) + WAVE4_HATCH
 
 EGG_PLAY = (
     {"id": "roll", "name": "ROLL", "cd": 40, "desc": "Luck or a kick."},
@@ -269,7 +280,7 @@ ITEMS = (
     {"id": "bomb", "name": "Smoke Bomb", "cost": 12, "kind": "flee"},
     {"id": "candy_bag", "name": "Rare Candy", "cost": 40, "kind": "hatch", "shave": 30 * 60},
     {"id": "clock", "name": "Time Chew", "cost": 70, "kind": "hatch", "shave": 60 * 60},
-) + EXTRA_ITEMS + MORE_ITEMS
+) + EXTRA_ITEMS + MORE_ITEMS + WAVE4_ITEMS
 ITEM_BY_ID = {it["id"]: it for it in ITEMS}
 FOODS = tuple(it for it in ITEMS if it["kind"] == "food")
 
@@ -327,7 +338,7 @@ ENEMIES = (
     {"id": "sentinel", "name": "Sentinel", "tag": "HALO", "hp": 42, "atk": 15, "defe": 9, "lo": 16, "hi": 25, "weak": "gun", "band": 2, "shape": "drone", "c0": (220, 200, 90), "c1": (140, 120, 30)},
     {"id": "zealot", "name": "Elite Zealot", "tag": "HALO", "hp": 54, "atk": 18, "defe": 8, "lo": 20, "hi": 30, "weak": "gun", "band": 3, "shape": "elite", "c0": (200, 160, 40), "c1": (110, 80, 16)},
     {"id": "chiefbrute", "name": "Chieftain", "tag": "HALO", "hp": 66, "atk": 20, "defe": 10, "lo": 24, "hi": 36, "weak": "slash", "band": 3, "shape": "ape", "c0": (180, 90, 30), "c1": (90, 36, 10)},
-) + EXTRA_ENEMIES + MORE_ENEMIES
+) + EXTRA_ENEMIES + MORE_ENEMIES + WAVE4_ENEMIES
 ENEMY_BY_ID = {e["id"]: e for e in ENEMIES}
 
 TYPE_COLOR = {
@@ -438,17 +449,26 @@ def player_hp(stage_i: int, strength: float) -> int:
     return int(36 + stage_i * 14 + strength * 0.8)
 
 
-def pick_enemy(tag: str, stage_i: int, strength: float) -> dict:
-    band = 0
-    if stage_i >= 3 or strength >= 40:
-        band = 3
-    elif stage_i >= 2 or strength >= 22:
-        band = 2
-    elif stage_i >= 1 or strength >= 10:
-        band = 1
-    pool = [e for e in ENEMIES if e["tag"] == tag and e["band"] <= band]
-    if not pool:
-        pool = [e for e in ENEMIES if e["tag"] == tag]
+def pick_enemy(tag: str, stage_i: int, strength: float, band: int | None = None) -> dict:
+    if band is None:
+        band = 0
+        if stage_i >= 3 or strength >= 40:
+            band = 3
+        elif stage_i >= 2 or strength >= 22:
+            band = 2
+        elif stage_i >= 1 or strength >= 10:
+            band = 1
+    band = max(0, min(3, int(band)))
+    tagged = [e for e in ENEMIES if e["tag"] == tag]
+    exact = [e for e in tagged if int(e.get("band") or 0) == band]
+    near = [e for e in tagged if abs(int(e.get("band") or 0) - band) <= 1]
+    roll = random.random()
+    if exact and roll < 0.82:
+        pool = exact
+    elif near:
+        pool = near
+    else:
+        pool = tagged or list(ENEMIES)
     return dict(random.choice(pool))
 
 

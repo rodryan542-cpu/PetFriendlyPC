@@ -21,9 +21,9 @@ from ctypes import wintypes
 from art import build_all
 from paths import asset_root, save_dir
 from clan_net import ClanNet
-from cutout import binary_rgba, clean_rgba, cutout, stamp_on_body
+from cutout import binary_rgba, clean_rgba, cutout, knockout_backdrop, stamp_on_body
 from catalog_extra import EXTRA_FOES, EXTRA_FORMS, EXTRA_LABELS, EXTRA_PLACES, PICK_PER_PAGE
-from depth import ATTACHMENTS, RUN_OBS, combat_stats, dirt_count, gear_of, grant_xp, hatch_mult, pick_raid_boss, roll_hit, enemy_hit
+from depth import ATTACHMENTS, RUN_OBS, combat_stats, dirt_count, gear_of, grant_xp, hatch_mult, pick_raid_boss, play_turn
 from field import new_raid, new_run, start_raid_wave
 from game_data import (
     FOODS,
@@ -45,7 +45,10 @@ from game_data import (
     TYPE_COLOR,
     blast_typ_for_enemy,
 )
-from handlers import give_item, handle, net_event
+from handlers import give_item, handle, net_event, pal_event
+from account import ensure_account, my_code
+from home import YARD_SLOTS, merge_friends, merge_tints, merge_yard, tint_rgba, yard_bonus, yard_score, yard_tier, yard_tint
+from pal_net import PalNet
 from panels import PW, PH, GameUI
 
 user32 = ctypes.windll.user32
@@ -170,7 +173,7 @@ HUD_W = 284
 HUD_H = 166
 PROP_W = 96
 PROP_H = 96
-PROP_N = 3
+PROP_N = 8
 BLAST_W = 168
 BLAST_H = 168
 KEY = (0, 253, 253)
@@ -256,9 +259,11 @@ HELP = (
     "MENU opens the pixel house. Pick a MAIN on first boot.\n"
     "HATCH LAB — Warm, lamp, pulse, incubate, carry, candy. They cut real minutes.\n"
     "MOVES — buy, equip three, upgrade to 5. Arena uses the loadout.\n"
-    "ARENA — 100+ foes. Type advantage. Struggle if you bought nothing.\n"
+    "ARENA — foes telegraph JAB/SMASH/GUARD/HEX/HEAL. Guard smash, Focus then hit, heat stops spam.\n"
     "SWAP pages through 24 partners. SHOP has a bag of 40 items.\n"
-    "CLAN — create one, invite anyone on the LAN running this, or type their code. War.\n"
+    "YARD — house, bed, tree, shower, bowl, lamp. Buy tiers. Tint them. They sit on monitor 2.\n"
+    "PALS — your account is a name plus a 6-letter code. Give the code. They type ADD. Any Wi-Fi.\n"
+    "CLAN — a crew with a code. Invite pals, then war other crews.\n"
     "GO / FEED / WASH still live on the pad. Drag the pad. They walk alone."
 )
 
@@ -375,6 +380,10 @@ def default_state() -> dict:
         "inbox": [],
         "gear_bag": {},
         "owned": [],
+        "yard": {s: 0 for s in YARD_SLOTS},
+        "yard_tint": {s: 0 for s in YARD_SLOTS},
+        "friends": [],
+        "friend_code": "",
         "partners": {ln["id"]: blank(ln["id"]) for ln in LINES},
     }
 
@@ -382,12 +391,15 @@ def default_state() -> dict:
 def load_state() -> dict:
     st = default_state()
     if not STATE_PATH.exists():
+        ensure_account(st)
         return st
     try:
         raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
+        ensure_account(st)
         return st
     if not isinstance(raw, dict):
+        ensure_account(st)
         return st
     partners = raw.get("partners") or {}
     for ln in LINES:
@@ -477,6 +489,10 @@ def load_state() -> dict:
         st["owned"] = []
     if st.get("player_name") and st["main"] in LINE_BY_ID and st["main"] not in st["owned"]:
         st["owned"].insert(0, st["main"])
+    st["yard"] = merge_yard(raw.get("yard"))
+    st["yard_tint"] = merge_tints(raw.get("yard_tint"))
+    st["friends"] = merge_friends(raw.get("friends"))
+    ensure_account(st)
     if st["owned"] and st["current"] not in st["owned"]:
         st["current"] = st["owned"][0]
     return st
@@ -497,7 +513,7 @@ def prepare(name: str) -> Path:
 
 
 def harden(im: Image.Image) -> Image.Image:
-    return clean_rgba(im, crop=True)
+    return knockout_backdrop(im, crop=True)
 
 
 def load_rgba(name: str) -> Image.Image:
@@ -512,7 +528,7 @@ def load_rgba(name: str) -> Image.Image:
 def load_ui(name: str) -> Image.Image:
     path = UI / name
     if path.exists():
-        return binary_rgba(Image.open(path).convert("RGBA"))
+        return binary_rgba(knockout_backdrop(Image.open(path).convert("RGBA"), crop=True))
     return Image.new("RGBA", (32, 32), (0, 0, 0, 0))
 
 
@@ -595,19 +611,25 @@ class DigimonPet:
         for it in FOODS:
             path = UI / f"food_{it['id']}.png"
             if path.exists():
-                self.food_ims[it["id"]] = binary_rgba(Image.open(path).convert("RGBA"))
+                self.food_ims[it["id"]] = binary_rgba(knockout_backdrop(Image.open(path).convert("RGBA"), crop=True))
         if "meat" not in self.food_ims:
             self.food_ims["meat"] = self.meat_im
         self.gear_ims = {}
         for a in ATTACHMENTS:
             path = UI / f"gear_{a['id']}.png"
             if path.exists():
-                self.gear_ims[a["id"]] = binary_rgba(Image.open(path).convert("RGBA"))
+                self.gear_ims[a["id"]] = binary_rgba(knockout_backdrop(Image.open(path).convert("RGBA"), crop=True))
         self.dirt_ims = {}
         for key in ("light", "mid", "heavy"):
             path = UI / f"dirt_{key}.png"
             if path.exists():
                 self.dirt_ims[key] = binary_rgba(Image.open(path).convert("RGBA"))
+        self.yard_ims = {}
+        for slot in YARD_SLOTS:
+            for tier in range(1, 6):
+                path = UI / f"yard_{slot}_{tier}.png"
+                if path.exists():
+                    self.yard_ims[(slot, tier)] = binary_rgba(knockout_backdrop(Image.open(path).convert("RGBA"), crop=True))
         self.obs_ims = {}
         for spec in RUN_OBS:
             path = UI / f"run_{spec['id']}.png"
@@ -622,6 +644,7 @@ class DigimonPet:
         self.boom_im = binary_rgba(Image.open(boom).convert("RGBA")) if boom.exists() else None
         self.eat_id = "meat"
         self.save = load_state()
+        ensure_account(self.save)
         self.anim = "idle"
         self.facing = 1
         self.anim_until = 0.0
@@ -761,6 +784,8 @@ class DigimonPet:
         self.hud.bind("<space>", self.on_field_space)
         self.net = ClanNet(self.presence)
         self.net.start()
+        self.pals = PalNet(self.pal_card)
+        self.pals.start()
         if not self.save.get("player_name"):
             self.ui.mode = "starter"
             self.panel_open = True
@@ -791,6 +816,18 @@ class DigimonPet:
     def _wait_sec(self, i: int) -> float:
         return float(WAIT_SEC[min(max(0, i), len(WAIT_SEC) - 1)])
 
+    def pal_card(self) -> dict:
+        ensure_account(self.save)
+        return {
+            "pid": self.save.get("player_id"),
+            "code": my_code(self.save),
+            "name": self.save.get("player_name") or "Trainer",
+            "main": self.save.get("main") or self.save.get("current"),
+            "yard": yard_score(self.save),
+            "pals": len(self.save.get("friends") or []),
+            "watch": [f.get("code") or f.get("id") for f in (self.save.get("friends") or [])],
+        }
+
     def presence(self) -> dict:
         clan = self.save.get("clan") or {}
         main = self.save.get("main") or self.save.get("current")
@@ -808,6 +845,9 @@ class DigimonPet:
             "str": int(p.get("strength") or 0),
             "form": self.form() if main == self.save.get("current") else None,
             "raid": bool(getattr(self, "raid_queued", False)),
+            "yard": yard_score(self.save),
+            "pals": len(self.save.get("friends") or []),
+            "friend_code": my_code(self.save),
         }
 
     def ask_text(self, title: str, prompt: str, default: str = "") -> str:
@@ -849,6 +889,8 @@ class DigimonPet:
         self.persist()
         if self.net:
             self.net.stop()
+        if getattr(self, "pals", None):
+            self.pals.stop()
         self.root.destroy()
 
     def hit(self, x: int, y: int) -> str | None:
@@ -1161,7 +1203,10 @@ class DigimonPet:
             self.fx = keep
 
     def _draw_bed(self, canvas: Image.Image) -> None:
-        bed = fit_h(self.bed.copy(), 150)
+        tier = yard_tier(self.save, "bed")
+        spr = self.yard_ims.get(("bed", tier)) if tier else None
+        bed = fit_h((spr or self.bed).copy(), 150)
+        bed = tint_rgba(bed, yard_tint(self.save, "bed"))
         bx = (PET_W - bed.width) // 2
         by = PET_H - bed.height + 8
         canvas.paste(bed, (bx, by), bed)
@@ -1174,20 +1219,26 @@ class DigimonPet:
     def _draw_shower(self, canvas: Image.Image, t: float) -> None:
         d = ImageDraw.Draw(canvas)
         cx = PET_W // 2
+        tier = yard_tier(self.save, "shower")
+        metal = ((150, 156, 164), (120, 170, 190), (200, 206, 214), (230, 196, 80))[max(0, min(3, tier))]
         d.ellipse((cx - 48, PET_H - 22, cx + 48, PET_H - 4), fill=(70, 78, 86), outline=(40, 44, 48))
-        d.rectangle((cx + 40, 20, cx + 46, PET_H - 24), fill=(150, 156, 164), outline=(60, 64, 70))
-        d.rectangle((cx - 8, 16, cx + 46, 22), fill=(150, 156, 164), outline=(60, 64, 70))
-        d.ellipse((cx - 22, 8, cx + 16, 30), fill=(188, 194, 202), outline=(60, 64, 70))
+        d.rectangle((cx + 40, 20, cx + 46, PET_H - 24), fill=metal, outline=(60, 64, 70))
+        d.rectangle((cx - 8, 16, cx + 46, 22), fill=metal, outline=(60, 64, 70))
+        d.ellipse((cx - 22, 8, cx + 16, 30), fill=metal, outline=(60, 64, 70))
+        if tier >= 3:
+            d.rectangle((cx - 56, 28, cx - 50, PET_H - 20), fill=(180, 200, 210), outline=(60, 64, 70))
+            d.rectangle((cx + 50, 28, cx + 56, PET_H - 20), fill=(180, 200, 210), outline=(60, 64, 70))
         im = self.body(140)
         im = im.resize((im.width, max(8, int(im.height * (1.0 + 0.02 * math.sin(t * 9))))), Image.Resampling.NEAREST)
         x = cx - im.width // 2 - 8
         y = PET_H - im.height - 14
         canvas.paste(im, (x, y), im)
-        for i in range(40):
+        drops = 40 + tier * 12
+        for i in range(drops):
             wx = cx - 16 + (i * 2) % 30 + int(math.sin(t * 12 + i) * 2)
             wy = 30 + int((t * 110 + i * 11) % 140)
             if wy < PET_H - 18:
-                d.point((wx, wy), fill=(230, 240, 248))
+                d.point((wx, wy), fill=(230, 240, 248) if tier < 4 else (180, 230, 255))
                 d.point((wx, wy + 1), fill=(170, 210, 235))
 
     def render_hud(self) -> Image.Image:
@@ -1204,6 +1255,10 @@ class DigimonPet:
         toast = None
         if self.ui.pending_chal:
             toast = f"FIGHT {self.ui.pending_chal.get('from_name', '?')}"
+        elif getattr(self.ui, "pending_buddy", None):
+            toast = f"PAL {self.ui.pending_buddy.get('from_name', '?')}"
+        elif getattr(self.ui, "pending_hunt", None):
+            toast = f"HUNT {self.ui.pending_hunt.get('from_name', '?')}"
         elif self.ui.pending_invite:
             toast = f"CLAN {self.ui.pending_invite.get('from_name', '?')}"
         if toast:
@@ -1233,9 +1288,12 @@ class DigimonPet:
                 php, pmax, ehp, emax = hp
                 meter("ME", 100.0 * php / max(1, pmax), 28, (80, 210, 90))
                 meter("FO", 100.0 * ehp / max(1, emax), 40, (220, 70, 60))
-                d.text((164, 28), f"{php}/{pmax}", font=self.f_tiny, fill=LCD_FG)
+                d.text((164, 28), f"{php}/{pmax} H{int((self._combat_st() or {}).get('heat') or 0)}", font=self.f_tiny, fill=LCD_FG)
                 d.text((164, 40), f"{ehp}/{emax}", font=self.f_tiny, fill=(220, 140, 90))
-                d.text((164, 52), self.foe_name[:10].upper(), font=self.f_tiny, fill=LCD_DIM)
+                stc = self._combat_st() or {}
+                intent = str(stc.get("intent") or "jab").upper()[:5]
+                weak = str((stc.get("foe") or {}).get("weak") or "")[:4].upper()
+                d.text((164, 52), f"{intent} {weak}".strip(), font=self.f_tiny, fill=(220, 180, 70))
             else:
                 meter("FD", p["hunger"], 28)
                 meter("MD", p["mood"], 40)
@@ -1304,7 +1362,7 @@ class DigimonPet:
                 while len(row1) < 4:
                     row1.append(("atk:struggle", "STRUG", (90, 70, 40)))
                 row1 = row1[:4]
-                row2 = (("fight", "FLEE"), ("shop", "SHOP"), ("hatch", "HATCH"), ("menu", "MENU"))
+                row2 = (("atk:guard", "GUARD", (50, 80, 110)), ("atk:focus", "FOCUS", (110, 70, 40)), ("fight", "FLEE"), ("menu", "MENU"))
                 row3 = (("bed", "BED"), ("shower", "WASH"), ("swap", "SWAP"), ("help", "HELP"))
             else:
                 row1 = (("feed", "FEED"), ("train", "TRN"), ("fight", "FIGHT"), ("evo", "EVO"))
@@ -1349,6 +1407,17 @@ class DigimonPet:
 
     def busy(self) -> bool:
         return self.p()["sleeping"] or self.showering or self.exploring or bool(self.field_mode)
+
+    def _combat_st(self) -> dict | None:
+        if self.field_mode == "raid" and self.field_state:
+            return self.field_state
+        if self.field_mode == "floor":
+            fl = getattr(self.ui, "floor", None)
+            if fl:
+                return fl
+        if self.ui.fight:
+            return self.ui.fight
+        return None
 
     def _combat_live(self) -> bool:
         if self.field_mode == "run":
@@ -1586,26 +1655,49 @@ class DigimonPet:
         update_layered(self.foe_hwnd, self.render_foe(), int(self.foe_x), int(self.foe_y))
 
     def _blit_props(self) -> None:
-        obs = []
-        if self.field_mode == "run" and self.field_state:
-            obs = list(self.field_state.get("obs") or [])[:PROP_N]
         mx, _, mw, _ = MON2
         floor = self.hud_y - PET_H - 4
+        if self.field_mode == "run" and self.field_state:
+            items = []
+            for o in list(self.field_state.get("obs") or [])[:PROP_N]:
+                items.append(("run", o.get("id"), mx + int(o["x"]), int(floor + PET_H - PROP_H - (72 if o.get("fly") else 0)), 0))
+        elif self._combat_live() or self.field_mode:
+            items = []
+        else:
+            layout = {
+                "house": mx + 36,
+                "tree": mx + 170,
+                "lamp": mx + 118,
+                "bowl": mx + 300,
+                "shower": mx + mw - 220,
+                "fence": mx + 70,
+                "pond": mx + 240,
+                "toy": mx + mw - 140,
+            }
+            items = []
+            for slot, px in layout.items():
+                tier = yard_tier(self.save, slot)
+                if tier <= 0:
+                    continue
+                items.append((slot, tier, int(px), int(floor + PET_H - PROP_H + 8), yard_tint(self.save, slot)))
         for i, hwnd in enumerate(self.prop_hwnds):
-            if i >= len(obs):
+            if i >= len(items):
                 blank = Image.new("RGBA", (PROP_W, PROP_H), (0, 0, 0, 0))
                 update_layered(hwnd, blank, -4000, -4000)
                 continue
-            o = obs[i]
-            spr = self.obs_ims.get(o.get("id"))
+            kind, key, px, py, tint = items[i]
             canvas = Image.new("RGBA", (PROP_W, PROP_H), (0, 0, 0, 0))
+            if kind == "run":
+                spr = self.obs_ims.get(key)
+            else:
+                spr = self.yard_ims.get((kind, key))
             if spr:
                 im = spr.copy()
                 s = min(PROP_W / max(1, im.width), PROP_H / max(1, im.height))
                 im = im.resize((max(8, int(im.width * s)), max(8, int(im.height * s))), Image.Resampling.NEAREST)
+                if kind != "run":
+                    im = tint_rgba(im, tint)
                 canvas.paste(im, ((PROP_W - im.width) // 2, PROP_H - im.height), im)
-            px = mx + int(o["x"])
-            py = int(floor + PET_H - PROP_H - (72 if o.get("fly") else 0))
             update_layered(hwnd, canvas, px, py)
 
     def _tick_foe(self, dt: float) -> None:
@@ -1694,11 +1786,12 @@ class DigimonPet:
         self.eat_id = it["id"]
         p = self.p()
         stuffed = p["hunger"] >= 86
-        p["hunger"] = min(100, p["hunger"] + int(it.get("hunger") or 12))
+        extra = int(yard_bonus(self.save)["feed"])
+        p["hunger"] = min(100, p["hunger"] + int(it.get("hunger") or 12) + extra)
         p["mood"] = min(100, p["mood"] + int(it.get("mood") or 2))
         p["feeds"] += 1
         p["poop_at"] = time.time() + 90
-        if stuffed:
+        if stuffed and not yard_bonus(self.save)["no_overfed"]:
             p["mood"] = max(0, p["mood"] - 10)
             p["hygiene"] = max(0, p["hygiene"] - 8)
             self.flash("OVERFED")
@@ -1738,7 +1831,7 @@ class DigimonPet:
             handle(self, "hatch:tap")
             return
         p = self.p()
-        p["mood"] = min(100, p["mood"] + 10)
+        p["mood"] = min(100, p["mood"] + 10 + int(yard_bonus(self.save).get("play") or 0))
         p["hunger"] = max(0, p["hunger"] - 2)
         if random.random() < 0.18:
             n = random.randint(1, 4)
@@ -1769,7 +1862,7 @@ class DigimonPet:
     def _street_coin(self) -> None:
         if self.anim != "walk":
             return
-        n = random.randint(1, 3)
+        n = random.randint(1, 3) + int(yard_bonus(self.save)["coins"])
         self.save["coins"] = int(self.save.get("coins", 0)) + n
         self.pop(f"+${n}", (255, 220, 70))
         self.persist()
@@ -1928,7 +2021,7 @@ class DigimonPet:
         if self.p()["sleeping"]:
             return
         p = self.p()
-        over = p["hygiene"] >= 88
+        over = p["hygiene"] >= 88 and not yard_bonus(self.save)["no_overwash"]
         p["hygiene"] = 100
         p["poop"] = False
         if over:
@@ -1937,7 +2030,7 @@ class DigimonPet:
             self.flash("OVERWASH")
             self.pop("BRR", (160, 200, 255))
         else:
-            p["mood"] = min(100, p["mood"] + 4)
+            p["mood"] = min(100, p["mood"] + 4 + int(yard_bonus(self.save)["wash"]))
             self.pop("SPLASH", (140, 210, 255))
         self.quest_tick("wash")
         self.persist()
@@ -2138,10 +2231,11 @@ class DigimonPet:
         if not st or st.get("kind") != "raid" or st.get("over"):
             return
         p = self.p()
-        e = st.get("enemy") or {}
-        if mid == "struggle":
-            mv = {"name": "Struggle", "typ": "strike", "pow": 8, "grow": 0}
-            lv = 1
+        e = st.get("foe") or st.get("enemy") or {}
+        if mid in ("guard", "focus"):
+            action, mv, lv = mid, None, 1
+        elif mid == "struggle":
+            action, mv, lv = "move", {"name": "Struggle", "typ": "strike", "pow": 8, "grow": 0}, 1
         else:
             from game_data import move_by_id
             mv = move_by_id(self.save["current"], mid)
@@ -2149,30 +2243,39 @@ class DigimonPet:
             if not mv or lv <= 0:
                 self.flash("NO MOVE")
                 return
+            action = "move"
         stats = combat_stats(p, p["stage_i"])
-        hit = roll_hit(mv, lv, stats, e)
-        p["hunger"] = max(0, p["hunger"] - 2)
-        if hit["miss"]:
-            st["log"] = "MISS"
-        else:
-            st["ehp"] = max(0, int(st["ehp"]) - hit["dmg"])
-            if hit["status"]:
-                st["status"] = hit["status"]
-            st["log"] = f"{mv['name'].upper()} {hit['dmg']}" + (" CRIT" if hit["crit"] else "")
-            if self.net:
-                self.net.raid_hit(hit["dmg"], self.save.get("player_name") or "You", self.save.get("player_id") or "", st["ehp"], st.get("wave") or 0)
-        killed = int(st.get("ehp") or 0) <= 0
-        dmg_in = self._raid_after_hit(stats)
-        counter = None
-        if not killed and dmg_in > 0:
-            counter = {"typ": blast_typ_for_enemy(e), "dmg": dmg_in, "label": str(e.get("name") or "HIT")}
-        self.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""), counter=counter)
+        out = play_turn(st, action, mv, lv, stats)
+        if out.get("blocked"):
+            self.flash("TOO HOT")
+            return
+        p["hunger"] = max(0, p["hunger"] - (1 if action != "move" else 2))
+        if action == "move" and not out.get("miss") and self.net:
+            self.net.raid_hit(int(out.get("dmg") or 0), self.save.get("player_name") or "You", self.save.get("player_id") or "", st.get("ehp") or 0, st.get("wave") or 0)
+        killed = bool(out.get("killed"))
+        if killed:
+            st["wave"] = int(st.get("wave") or 0) + 1
+            if st["wave"] > 3:
+                self._raid_finish(True)
+                self.play_blast(str(out.get("typ") or "strike"), dmg=int(out.get("dmg") or 0), crit=bool(out.get("crit")), miss=bool(out.get("miss")), label=str((mv or {}).get("name") or action.upper()))
+                return
+            start_raid_wave(self, st)
+            e2 = (self.field_state or {}).get("enemy") or {}
+            self.begin_desktop_fight("raid", e2, boss=str(e2.get("id") or "").startswith("raid_"))
+            self.play_blast(str(out.get("typ") or "strike"), dmg=int(out.get("dmg") or 0), crit=bool(out.get("crit")), miss=bool(out.get("miss")), label=str((mv or {}).get("name") or action.upper()))
+            return
+        counter = out.get("counter")
+        if counter:
+            counter = {**counter, "typ": blast_typ_for_enemy(e)}
+        self.play_blast(str(out.get("typ") or "strike"), dmg=0 if out.get("miss") else int(out.get("dmg") or 0), crit=bool(out.get("crit")), miss=bool(out.get("miss")), label=str((mv or {}).get("name") or action.upper()), counter=counter)
+        if out.get("wiped"):
+            self._raid_finish(False)
 
     def _raid_after_hit(self, stats: dict) -> int:
         st = self.field_state
         if not st:
             return 0
-        e = st.get("enemy") or {}
+        e = st.get("foe") or st.get("enemy") or {}
         if int(st.get("ehp") or 0) <= 0:
             st["wave"] = int(st.get("wave") or 0) + 1
             if st["wave"] > 3:
@@ -2182,11 +2285,7 @@ class DigimonPet:
             e = st.get("enemy") or {}
             self.begin_desktop_fight("raid", e, boss=str(e.get("id") or "").startswith("raid_"))
             return 0
-        dmg_in = enemy_hit(e, stats, st.get("status") or "")
-        st["php"] = max(0, int(st["php"]) - dmg_in)
-        if st["php"] <= 0:
-            self._raid_finish(False)
-        return int(dmg_in or 0)
+        return 0
 
     def _raid_finish(self, won: bool) -> None:
         st = self.field_state
@@ -2302,17 +2401,22 @@ class DigimonPet:
             p["mood"] = max(0, p["mood"] - 6)
             p["hygiene"] = max(0, p["hygiene"] - 10)
             self.persist()
-        drain = 0.45 if p["sleeping"] else 1.1
+        yb = yard_bonus(self.save)
+        drain = (0.32 if p["sleeping"] else 1.1) * max(0.35, 1.0 - yb["hunger"] / 100.0)
         self.hunger_acc += dt * drain
         if self.hunger_acc >= 18:
             p["hunger"] = max(0, p["hunger"] - 1)
             if not p["sleeping"]:
-                p["mood"] = max(0, p["mood"] - 1)
+                hold = yb["mood_hold"]
+                if random.randint(1, 100) > hold:
+                    p["mood"] = max(0, p["mood"] - 1)
                 p["hygiene"] = max(0, p["hygiene"] - 1)
             if p["poop"]:
                 p["mood"] = max(0, p["mood"] - 1)
             if p["sleeping"]:
-                p["mood"] = min(100, p["mood"] + 1)
+                p["mood"] = min(100, p["mood"] + 1 + int(yb["sleep"]))
+                if yard_tier(self.save, "bed") >= 3:
+                    p["hygiene"] = min(100, p["hygiene"] + 1)
             self.hunger_acc = 0
             self.persist()
         if self.net:
@@ -2322,6 +2426,13 @@ class DigimonPet:
                 except queue.Empty:
                     break
                 net_event(self, ev)
+        if getattr(self, "pals", None):
+            while True:
+                try:
+                    ev = self.pals.events.get_nowait()
+                except queue.Empty:
+                    break
+                pal_event(self, ev)
         if self.field_mode == "run" and self.field_state:
             self._tick_run(dt)
         elif self.field_mode == "raid" and self.field_state and not self.field_state.get("over"):

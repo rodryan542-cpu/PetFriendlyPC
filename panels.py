@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from cutout import knockout_backdrop
+
 from catalog_extra import (
     HATCH_PER_PAGE,
     MOVE_PER_PAGE,
@@ -14,6 +16,16 @@ from catalog_extra import (
     STARTER_PER_PAGE,
 )
 from depth import ATTACHMENTS, ATTACH_BY_ID, GEAR_PER_PAGE, GEAR_SLOTS, combat_stats, gear_of, partner_level, xp_need
+from account import my_code
+from home import (
+    YARD_PER_PAGE,
+    YARD_SLOTS,
+    bond_title,
+    next_yard,
+    yard_item,
+    yard_score,
+    yard_tier,
+)
 from game_data import (
     CLAN_CRESTS,
     EGGS,
@@ -91,7 +103,7 @@ F_SMALL = _font(14)
 def _load(name: str) -> Image.Image:
     p = UI / name
     if p.exists():
-        return Image.open(p).convert("RGBA")
+        return knockout_backdrop(Image.open(p).convert("RGBA"), crop=True)
     return Image.new("RGBA", (8, 8), (0, 0, 0, 0))
 
 
@@ -203,7 +215,12 @@ class GameUI:
         self.roster_page = 0
         self.shop_view = "bag"
         self.fight_view = "wild"
-        self.together_view = "team"
+        self.together_view = "pals"
+        self.pending_buddy: dict | None = None
+        self.pending_hunt: dict | None = None
+        self.yard_page = 0
+        self.sel_friend: str | None = None
+        self.pal_page = 0
         self.gear_page = 0
         self.floor = None
 
@@ -227,13 +244,15 @@ class GameUI:
         _rect(d, (6, 6, PW - 6, 36), (28, 22, 16))
         title = {
             "starter": "CHOOSE MAIN",
-            "together": "TEAM",
+            "together": "PALS",
             "shop": "SHOP",
             "hatch": "HATCH LAB",
             "moves": "DOJO",
             "fight": "ARENA",
             "stats": "STATS",
         }.get(self.mode, "TEAM")
+        if self.mode == "together":
+            title = {"pals": "PALS", "clan": "CLAN", "pets": "PETS", "mail": "MAIL"}.get(getattr(self, "together_view", "pals"), "PALS")
         if self.typing:
             title = self.typing.get("title", "TYPE")
         d.text((14, 10), title, font=F_TITLE, fill=GOLD)
@@ -330,83 +349,136 @@ class GameUI:
         self._btn(d, (280, 380, 500, 416), "BEGIN", "begin")
 
     def _together(self, n, d, pet) -> None:
-        clan = pet.save.get("clan")
-        cur = pet.save.get("current") or pet.save.get("main")
-        me = pet.save.get("player_name") or "???"
-        p = pet.save["partners"].get(cur) or pet.p()
-        pwr = power_of(p, cur)
-
-        _frame(d, (16, 78, 744, 156), FACE, GOLD_DK, EDGE)
-        spr = _fit(_sprite(pet, pet.form()), 64, 64)
-        _paste(n, spr, (24, 86))
-        _clip(d, (100, 84), me, F_TITLE, GOLD, 220)
-        _clip(d, (100, 108), f"{LINE_NAME.get(cur, cur)}  {pet.form_label()}", F_BODY, INK, 300)
-        _clip(d, (100, 130), f"Lv {partner_level(p)}  Pwr {pwr}  Fd {int(p.get('hunger', 0))}  Md {int(p.get('mood', 0))}  Hy {int(p.get('hygiene', 0))}", F_SMALL, GREEN, 400)
-        self._btn(d, (520, 86, 620, 120), "PLAY", "play")
-        self._btn(d, (628, 86, 736, 120), "MAIL", "mail_view", on=getattr(self, "together_view", "team") == "mail")
-        team = getattr(self, "together_view", "team") != "mail"
-        if not team:
+        view = getattr(self, "together_view", "pals")
+        self._btn(d, (16, 74, 110, 100), "PALS", "team_pals", on=view == "pals")
+        self._btn(d, (118, 74, 212, 100), "CLAN", "team_clan", on=view == "clan")
+        self._btn(d, (220, 74, 314, 100), "PETS", "team_pets", on=view == "pets")
+        self._btn(d, (322, 74, 416, 100), "MAIL", "mail_view", on=view == "mail")
+        if view == "mail":
             self._mail(n, d, pet)
-            return
-        if clan:
-            _clip(d, (520, 128), f"{clan.get('name', '')}  {clan.get('code', '')}", F_SMALL, INK, 210)
+        elif view == "clan":
+            self._clan(n, d, pet)
+        elif view == "pets":
+            self._pets(n, d, pet)
         else:
-            _clip(d, (520, 128), "No clan yet", F_SMALL, DIM, 210)
+            self._pals(n, d, pet)
 
+    def _pals(self, n, d, pet) -> None:
+        code = my_code(pet.save)
+        net = getattr(pet, "pals", None)
+        live_ok = bool(net and net.ok)
+        pals = list(pet.save.get("friends") or [])
+        _clip(d, (430, 78), "Your code. Anyone playing can add it. Any Wi-Fi.", F_SMALL, DIM, 310)
+        _frame(d, (16, 108, 400, 156), FACE, GOLD_DK, EDGE)
+        _clip(d, (24, 112), "YOUR CODE", F_SMALL, DIM, 160)
+        _clip(d, (24, 128), code or "------", F_TITLE, GOLD, 220)
+        _clip(d, (200, 132), "NET ON" if live_ok else "NET OFF", F_SMALL, GREEN if live_ok else RED, 180)
+        self._btn(d, (280, 114, 392, 148), "ADD", "pal_add")
+        if not pals:
+            _clip(d, (24, 180), "No pals. They make an account, give you their code, you hit ADD.", F_BODY, INK, 700)
+        page = int(getattr(self, "pal_page", 0) or 0)
+        pages = max(1, (len(pals) + 3) // 4)
+        page = page % pages
+        chunk = pals[page * 4 : page * 4 + 4]
+        if pals:
+            self._btn(d, (650, 108, 744, 134), f"{page + 1}/{pages}", "pal_next")
+        sel = getattr(self, "sel_friend", None)
+        if sel and not any(f.get("id") == sel or f.get("code") == sel for f in pals):
+            sel = pals[0]["id"] if pals else None
+            self.sel_friend = sel
+        if not sel and pals:
+            sel = pals[0]["id"]
+            self.sel_friend = sel
+        for i, f in enumerate(chunk):
+            y0 = 168 + i * 44
+            key = f.get("code") or f.get("id")
+            on = key == sel or f.get("id") == sel
+            here = net.online(key) if net else None
+            _frame(d, (16, y0, 400, y0 + 40), (40, 48, 28) if on else FACE2, GOLD if on else GOLD_DK, EDGE)
+            _clip(d, (24, y0 + 2), str(f.get("name") or key or "?"), F_BODY, GOLD if here else INK, 200)
+            _clip(d, (24, y0 + 20), f"{'ON' if here else 'OFF'}  {key}  {bond_title(int(f.get('bond') or 0))}", F_SMALL, GREEN if here else DIM, 360)
+            self.hits.append((f"pal_sel:{key}", (16, y0, 400, y0 + 40)))
+        pick = next((f for f in pals if (f.get("code") or f.get("id")) == sel or f.get("id") == sel), None)
+        if pick:
+            key = pick.get("code") or pick.get("id")
+            here = net.online(key) if net else None
+            _clip(d, (420, 168), f"{pick.get('name')}  {key}", F_BODY, GOLD, 310)
+            if here:
+                _clip(d, (420, 192), f"Online  {bond_title(int(pick.get('bond') or 0))}  {LINE_NAME.get(here.get('main') or pick.get('main') or '', '')}", F_SMALL, GREEN, 310)
+            else:
+                _clip(d, (420, 192), f"{bond_title(int(pick.get('bond') or 0))}  Gift and notes still send.", F_SMALL, DIM, 310)
+            self._btn(d, (420, 224, 520, 256), "GIFT", f"pal_gift:{key}")
+            self._btn(d, (528, 224, 628, 256), "VISIT", f"pal_visit:{key}")
+            self._btn(d, (636, 224, 744, 256), "NOTE", f"pal_note:{key}")
+            self._btn(d, (420, 264, 520, 296), "SNACK", f"pal_snack:{key}")
+            self._btn(d, (528, 264, 628, 296), "CHEER", f"pal_cheer:{key}")
+            self._btn(d, (636, 264, 744, 296), "HUNT", f"pal_hunt:{key}")
+            self._btn(d, (420, 304, 520, 336), "DROP", f"pal_drop:{key}")
+            lan = None
+            if pet.net:
+                lan = next((p for p in pet.net.nearby() if p.get("friend_code") == key or p.get("pid") == pick.get("id")), None)
+            if lan:
+                self._btn(d, (528, 304, 628, 336), "FIGHT", f"chal:{lan.get('pid')}")
+
+    def _clan(self, n, d, pet) -> None:
+        clan = pet.save.get("clan")
+        _clip(d, (16, 112), "A crew. Code is five letters. Invite pals. War other crews.", F_BODY, INK, 720)
+        if not clan:
+            crest = CLAN_CRESTS[self.crest_i % len(CLAN_CRESTS)]
+            self._btn(d, (16, 160, 160, 210), "MAKE", "clan_create")
+            self._btn(d, (176, 160, 320, 210), "JOIN", "clan_join")
+            self._btn(d, (336, 160, 500, 210), crest.upper(), "crest")
+            _clip(d, (16, 230), "MAKE names it. JOIN needs their code and them online nearby.", F_SMALL, DIM, 700)
+            return
+        _clip(d, (16, 150), f"{clan.get('name')}   {clan.get('code')}   {clan.get('wins', 0)}-{clan.get('losses', 0)}", F_TITLE, GOLD, 520)
+        self._btn(d, (560, 148, 744, 186), "LEAVE", "clan_leave")
+        members = list(clan.get("members") or [])
+        for i, m in enumerate(members[:6]):
+            y = 200 + i * 22
+            _clip(d, (24, y), f"{m.get('name', '?')}  {LINE_NAME.get(m.get('main', ''), '')}  pwr {int(m.get('power') or 0)}", F_SMALL, INK, 500)
+        pals = list(pet.save.get("friends") or [])
+        live = online_map(pet.net.nearby() if pet.net else [])
+        invitable = [f for f in pals if live.get(f.get("id")) and live[f["id"]].get("clan_id") != clan.get("id")]
+        _clip(d, (16, 340), "Invite a pal who is online.", F_SMALL, DIM, 400)
+        for i, f in enumerate(invitable[:3]):
+            x0 = 16 + i * 180
+            self._btn(d, (x0, 364, x0 + 170, 400), f"INV {str(f.get('name') or '?')[:8]}", f"inv:{f.get('id')}")
+        rivals = [p for p in (pet.net.nearby() if pet.net else []) if p.get("clan_id") and p.get("clan_id") != clan.get("id")]
+        if rivals:
+            r = rivals[0]
+            self._btn(d, (560, 364, 744, 400), f"WAR {str(r.get('clan_name') or 'THEM')[:8]}", f"war:{r.get('pid')}")
+
+    def _pets(self, n, d, pet) -> None:
+        cur = pet.save.get("current") or pet.save.get("main")
         page = int(getattr(self, "roster_page", 0) or 0)
         chunk = LINES[page * ROSTER_PER_PAGE : page * ROSTER_PER_PAGE + ROSTER_PER_PAGE]
         pages = max(1, (len(LINES) + ROSTER_PER_PAGE - 1) // ROSTER_PER_PAGE)
-        _clip(d, (16, 164), f"Owned walk free. Everyone else is {fmt_price(line_price(''))}.", F_BODY, GOLD, 400)
-        self._btn(d, (620, 162, 744, 192), f"{page + 1}/{pages}", "roster_next")
+        _clip(d, (16, 112), f"Owned walk free. Everyone else is {fmt_price(line_price(''))}.", F_BODY, GOLD, 500)
+        self._btn(d, (620, 108, 744, 138), f"{page + 1}/{pages}", "roster_next")
         for i, ln in enumerate(chunk):
             col, row = i % 3, i // 3
             x0 = 16 + col * 244
-            y0 = 198 + row * 64
+            y0 = 150 + row * 70
             pid = ln["id"]
             pp = pet.save["partners"].get(pid) or {}
             on = pid == cur
             have = owns_line(pet.save, pid)
-            _frame(d, (x0, y0, x0 + 236, y0 + 58), (40, 48, 28) if on else FACE2, GOLD if on else GOLD_DK, EDGE)
+            _frame(d, (x0, y0, x0 + 236, y0 + 64), (40, 48, 28) if on else FACE2, GOLD if on else GOLD_DK, EDGE)
             form = ln["stages"][max(0, min(int(pp.get("stage_i") or 0), len(ln["stages"]) - 1))]
-            spr = _fit(_sprite(pet, form), 46, 46)
+            spr = _fit(_sprite(pet, form), 50, 50)
             _paste(n, spr, (x0 + 8, y0 + 6))
-            _clip(d, (x0 + 62, y0 + 6), LINE_NAME[pid], F_BODY, GOLD if on else INK, 164)
+            _clip(d, (x0 + 66, y0 + 8), LINE_NAME[pid], F_BODY, GOLD if on else INK, 160)
             if have:
-                _clip(d, (x0 + 62, y0 + 30), f"{ln['tag']}  st {int(pp.get('stage_i') or 0)}", F_SMALL, DIM, 164)
+                _clip(d, (x0 + 66, y0 + 34), f"{ln['tag']}  st {int(pp.get('stage_i') or 0)}", F_SMALL, DIM, 160)
             else:
-                _clip(d, (x0 + 62, y0 + 30), f"BUY {fmt_price(line_price(pid))}", F_SMALL, GOLD, 164)
-            self.hits.append((f"swap:{pid}", (x0, y0, x0 + 236, y0 + 58)))
-
-        if not clan:
-            self._btn(d, (16, 334, 130, 372), "MAKE", "clan_create")
-            self._btn(d, (140, 334, 254, 372), "JOIN", "clan_join")
-            crest = CLAN_CRESTS[self.crest_i % len(CLAN_CRESTS)]
-            self._btn(d, (264, 334, 380, 372), crest.upper(), "crest")
-        else:
-            _clip(d, (16, 340), f"{clan.get('name')}  {clan.get('wins', 0)}-{clan.get('losses', 0)}", F_BODY, INK, 300)
-            self._btn(d, (320, 334, 420, 372), "LEAVE", "clan_leave")
-
-        peers = pet.net.nearby() if pet.net else []
-        if self.sel_peer and not any(p.get("pid") == self.sel_peer for p in peers):
-            self.sel_peer = peers[0]["pid"] if peers else None
-        if not self.sel_peer and peers:
-            self.sel_peer = peers[0]["pid"]
-        if not peers:
-            _clip(d, (16, 386), "Nobody on the LAN. Same Wi-Fi, same pet.", F_SMALL, DIM, 720)
-        else:
-            peer = next((x for x in peers if x.get("pid") == self.sel_peer), peers[0])
-            _clip(d, (16, 384), f"{peer.get('name', '?')}  {LINE_NAME.get(peer.get('main', ''), '')}", F_SMALL, INK, 360)
-            self._btn(d, (400, 378, 520, 414), "FIGHT", f"chal:{peer.get('pid')}")
-            if clan:
-                self._btn(d, (528, 378, 640, 414), "INVITE", f"inv:{peer.get('pid')}")
-                if peer.get("clan_id") and peer.get("clan_id") != clan.get("id"):
-                    self._btn(d, (648, 378, 744, 414), "WAR", f"war:{peer.get('pid')}")
+                _clip(d, (x0 + 66, y0 + 34), f"BUY {fmt_price(line_price(pid))}", F_SMALL, GOLD, 160)
+            self.hits.append((f"swap:{pid}", (x0, y0, x0 + 236, y0 + 64)))
 
     def _mail(self, n, d, pet) -> None:
         inbox = list(pet.save.get("inbox") or [])[-8:]
-        _clip(d, (16, 164), "LAN mail. Same Wi-Fi, same pet.", F_BODY, GOLD, 400)
+        _clip(d, (16, 164), "Shout to the LAN, or NOTE a pal for a private line.", F_BODY, GOLD, 500)
         self._btn(d, (520, 162, 640, 192), "WRITE", "mail_write")
-        self._btn(d, (648, 162, 744, 192), "TEAM", "mail_team")
+        self._btn(d, (648, 162, 744, 192), "PALS", "team_pals")
         if not inbox:
             _clip(d, (24, 220), "No messages yet. WRITE sends to everyone nearby.", F_SMALL, DIM, 700)
         else:
@@ -419,11 +491,15 @@ class GameUI:
         _clip(d, (16, 396), f"{len(peers)} nearby", F_SMALL, DIM, 300)
 
     def _shop(self, n, d, pet) -> None:
-        gear = getattr(self, "shop_view", "bag") == "gear"
-        self._btn(d, (16, 74, 110, 102), "BAG", "shop_bag", on=not gear)
-        self._btn(d, (118, 74, 230, 102), "GEAR", "shop_gear", on=gear)
-        if gear:
+        view = getattr(self, "shop_view", "bag")
+        self._btn(d, (16, 74, 110, 102), "BAG", "shop_bag", on=view == "bag")
+        self._btn(d, (118, 74, 230, 102), "GEAR", "shop_gear", on=view == "gear")
+        self._btn(d, (238, 74, 350, 102), "YARD", "shop_yard", on=view == "yard")
+        if view == "gear":
             self._shop_gear(n, d, pet)
+            return
+        if view == "yard":
+            self._shop_yard(n, d, pet)
             return
         page = int(getattr(self, "shop_page", 0) or 0)
         chunk = ITEMS[page * SHOP_PER_PAGE : page * SHOP_PER_PAGE + SHOP_PER_PAGE]
@@ -473,6 +549,34 @@ class GameUI:
                 self._btn(d, (x0 + 92, y0 + 234, x0 + 170, y0 + 260), "WEAR" if not on else "OFF", f"wear:{a['id']}")
         eq = "  ".join(f"{s}:{ATTACH_BY_ID.get(v, {}).get('name', '—') if v else '—'}" for s, v in worn.items())
         _clip(d, (16, 388), eq[:90], F_SMALL, GREEN, 728)
+
+    def _shop_yard(self, n, d, pet) -> None:
+        page = int(getattr(self, "yard_page", 0) or 0)
+        pages = max(1, (len(YARD_SLOTS) + YARD_PER_PAGE - 1) // YARD_PER_PAGE)
+        page = page % pages
+        chunk = YARD_SLOTS[page * YARD_PER_PAGE : page * YARD_PER_PAGE + YARD_PER_PAGE]
+        _clip(d, (360, 78), f"Yard score {yard_score(pet.save)}. Sits on monitor 2.", F_SMALL, DIM, 220)
+        self._btn(d, (600, 74, 744, 102), f"{page + 1}/{pages}", "yard_next")
+        for i, slot in enumerate(chunk):
+            col, row = i % 3, i // 3
+            x0 = 12 + col * 248
+            y0 = 108 + row * 154
+            tier = yard_tier(pet.save, slot)
+            cur = yard_item(slot, tier)
+            nxt = next_yard(pet.save, slot)
+            _frame(d, (x0, y0, x0 + 240, y0 + 146), FACE2, GOLD_DK, EDGE)
+            icon = _fit(_load(f"yard_{slot}_{max(1, tier or 1)}.png"), 72, 72, Image.Resampling.LANCZOS)
+            _paste(n, icon, (x0 + 8, y0 + 10))
+            title = cur["name"] if cur else slot.upper()
+            _clip(d, (x0 + 88, y0 + 8), title, F_BODY, GOLD, 144)
+            _clip(d, (x0 + 88, y0 + 32), f"Lv {tier}/5  {slot}", F_SMALL, INK, 144)
+            blurb = (nxt or cur or {}).get("blurb", "Buy the first piece.")
+            _clip(d, (x0 + 8, y0 + 88), blurb, F_SMALL, DIM, 224)
+            self._btn(d, (x0 + 8, y0 + 112, x0 + 118, y0 + 138), "TINT", f"yard_tint:{slot}")
+            if nxt:
+                self._btn(d, (x0 + 126, y0 + 112, x0 + 232, y0 + 138), f"UP {fmt_price_short(shop_cost(nxt['cost']))}", f"yard_up:{slot}")
+            else:
+                _clip(d, (x0 + 130, y0 + 116), "MAX", F_SMALL, GREEN, 80)
 
     def _hatch(self, n, d, pet) -> None:
         p = pet.p()
@@ -623,14 +727,14 @@ class GameUI:
             self._floor(n, d, pet)
             return
         if self.fight is None:
-            _clip(d, (32, 120), "Wild scrap on monitor 2. The foe walks in on the desktop.", F_BODY, INK, 680)
-            _clip(d, (32, 152), "Moves are on the pad. Equip four in DOJO. No battle screen.", F_SMALL, DIM, 680)
+            _clip(d, (32, 120), "Wild scrap on monitor 2. The foe walks in. It telegraphs the next hit.", F_BODY, INK, 680)
+            _clip(d, (32, 152), "GUARD smash. FOCUS then strike. Heat fills on big moves — cool with guard.", F_SMALL, DIM, 680)
             st = combat_stats(pet.p(), pet.p()["stage_i"])
             _clip(d, (32, 184), f"Lv {st['level']}  HP {st['hp']}  ATK {int(st['atk'])}  DEF {int(st['defe'])}  CRIT {int(st['crit']*100)}%", F_BODY, GREEN, 680)
             self._btn(d, (250, 230, 510, 290), "WILD FIGHT", "fight_start")
             return
         f = self.fight
-        ene = ENEMY_BY_ID.get(f["eid"], {})
+        ene = f.get("foe") or ENEMY_BY_ID.get(f["eid"], {})
         _frame(d, (24, 80, 250, 220), FACE2, GOLD_DK, EDGE)
         _frame(d, (510, 80, 736, 220), FACE2, GOLD_DK, EDGE)
         spr = _fit(_sprite(pet, pet.form()), 200, 120)
@@ -641,18 +745,24 @@ class GameUI:
         _clip(d, (518, 226), str(ene.get("name", "?")), F_BODY, GOLD, 210)
         self._hp(d, 32, 252, 218, f["php"], f["pmax"], GREEN)
         self._hp(d, 518, 252, 218, f["ehp"], f["emax"], RED)
-        _clip(d, (32, 278), f.get("log", ""), F_BODY, INK, 696)
+        intent = str(f.get("intent") or "jab").upper()
+        heat = int(f.get("heat") or 0)
+        you = "FOCUS" if f.get("focus") else (str(f.get("pstatus") or "") or "OK")
+        _clip(d, (32, 278), f"FOE {intent}   HEAT {heat}   YOU {you.upper()}   weak {ene.get('weak', '-')}", F_SMALL, GOLD, 696)
+        _clip(d, (32, 300), f.get("log", ""), F_BODY, INK, 696)
         if f.get("over"):
             self._btn(d, (270, 330, 490, 380), "AGAIN", "fight_start")
             return
+        self._btn(d, (16, 328, 176, 358), "GUARD", "use:guard")
+        self._btn(d, (184, 328, 344, 358), "FOCUS", "use:focus")
         load = [m for m in (pet.p().get("loadout") or []) if m]
         if not load:
-            self._btn(d, (250, 330, 510, 384), "STRUGGLE", "use:struggle")
+            self._btn(d, (360, 328, 736, 358), "STRUGGLE", "use:struggle")
         else:
             for i, mid in enumerate(load[:4]):
                 mv = move_by_id(pet.save["current"], mid)
                 x0 = 16 + i * 184
-                self._btn(d, (x0, 330, x0 + 176, 384), (mv or {}).get("name", mid), f"use:{mid}")
+                self._btn(d, (x0, 362, x0 + 176, 392), (mv or {}).get("name", mid), f"use:{mid}")
 
     def _raid_lobby(self, n, d, pet) -> None:
         q = bool(getattr(pet, "raid_queued", False))
@@ -672,23 +782,25 @@ class GameUI:
 
     def _floor(self, n, d, pet) -> None:
         fl = getattr(self, "floor", None)
-        _clip(d, (32, 120), "Five floors on the desktop. Each foe walks in. HP carries.", F_BODY, INK, 700)
+        _clip(d, (32, 120), "Five floors. HP carries. Guard smash, focus big hits, watch the telegraph.", F_BODY, INK, 700)
         if not fl:
             self._btn(d, (250, 200, 510, 260), "ENTER DUNGEON", "floor_start")
             return
         _clip(d, (32, 156), f"Floor {int(fl.get('n') or 1)}/5   {fl.get('log', '')}", F_BODY, GOLD, 700)
         self._hp(d, 32, 190, 320, int(fl.get("php") or 0), max(1, int(fl.get("pmax") or 1)), GREEN)
         self._hp(d, 400, 190, 320, int(fl.get("ehp") or 0), max(1, int(fl.get("emax") or 1)), RED)
-        _clip(d, (32, 220), f"You  {int(fl.get('php') or 0)}     Foe  {fl.get('ename', '')} {int(fl.get('ehp') or 0)}", F_SMALL, INK, 700)
+        _clip(d, (32, 220), f"You {int(fl.get('php') or 0)}   {fl.get('ename', '')} {int(fl.get('ehp') or 0)}   FOE {str(fl.get('intent') or 'jab').upper()}  HEAT {int(fl.get('heat') or 0)}", F_SMALL, INK, 700)
         if fl.get("over"):
             self._btn(d, (250, 300, 510, 360), "AGAIN", "floor_start")
             return
         if fl.get("clear"):
             self._btn(d, (250, 280, 510, 340), "NEXT FLOOR", "floor_next")
             return
+        self._btn(d, (16, 250, 176, 286), "GUARD", "floor:guard")
+        self._btn(d, (184, 250, 344, 286), "FOCUS", "floor:focus")
         load = [m for m in (pet.p().get("loadout") or []) if m]
         if not load:
-            self._btn(d, (250, 330, 510, 384), "STRUGGLE", "floor:struggle")
+            self._btn(d, (360, 250, 720, 286), "STRUGGLE", "floor:struggle")
         else:
             for i, mid in enumerate(load[:4]):
                 mv = move_by_id(pet.save["current"], mid)

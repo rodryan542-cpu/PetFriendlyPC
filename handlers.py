@@ -23,9 +23,30 @@ from depth import (
     grant_xp,
     hatch_mult,
     pick_raid_boss,
-    roll_hit,
-    enemy_hit,
+    RAID_BOSSES,
+    play_turn,
+    scale_foe,
+    seed_battle,
     gear_bonus,
+)
+from account import my_code, normalize_code
+from home import (
+    GIFT_CD,
+    GIFT_COINS,
+    VISIT_CD,
+    YARD_PER_PAGE,
+    YARD_SLOTS,
+    CHEER_CD,
+    SNACK_CD,
+    HUNT_CD,
+    add_bond,
+    buy_yard,
+    cycle_tint,
+    drop_friend,
+    friend_of,
+    is_friend,
+    upsert_friend,
+    yard_score,
 )
 from game_data import (
     CLAN_CRESTS,
@@ -144,17 +165,90 @@ def handle(pet, action: str) -> None:
     if action == "toast_yes":
         if pet.ui.pending_chal:
             _chal_yes(pet)
+        elif getattr(pet.ui, "pending_buddy", None):
+            _buddy_yes(pet)
+        elif getattr(pet.ui, "pending_hunt", None):
+            _hunt_yes(pet)
         else:
             _invite_yes(pet)
         return
     if action == "toast_no":
         if pet.ui.pending_chal:
             _chal_no(pet)
+        elif getattr(pet.ui, "pending_buddy", None):
+            _buddy_no(pet)
+        elif getattr(pet.ui, "pending_hunt", None):
+            pet.ui.pending_hunt = None
+            pet.ui.say("NO HUNT")
         elif pet.ui.pending_invite and pet.net:
             inv = pet.ui.pending_invite
             pet.net.reply_invite(inv.get("ip", ""), inv.get("from_pid", ""), False, None, inv.get("port"))
             pet.ui.pending_invite = None
             pet.ui.say("DECLINED")
+        return
+    if action == "shop_yard":
+        pet.ui.shop_view = "yard"
+        return
+    if action == "yard_next":
+        n = max(1, (len(YARD_SLOTS) + YARD_PER_PAGE - 1) // YARD_PER_PAGE)
+        pet.ui.yard_page = (int(getattr(pet.ui, "yard_page", 0) or 0) + 1) % n
+        return
+    if action.startswith("yard_up:"):
+        _yard_up(pet, action.split(":", 1)[1])
+        return
+    if action.startswith("yard_tint:"):
+        cycle_tint(pet.save, action.split(":", 1)[1])
+        pet.persist()
+        pet.ui.say("TINT")
+        return
+    if action == "team_pals":
+        pet.ui.together_view = "pals"
+        pet.ui.mode = "together"
+        return
+    if action == "team_clan":
+        pet.ui.together_view = "clan"
+        pet.ui.mode = "together"
+        return
+    if action == "team_pets":
+        pet.ui.together_view = "pets"
+        pet.ui.mode = "together"
+        return
+    if action == "pal_next":
+        n = max(1, (len(pet.save.get("friends") or []) + 3) // 4)
+        pet.ui.pal_page = (int(getattr(pet.ui, "pal_page", 0) or 0) + 1) % n
+        return
+    if action.startswith("pal_sel:"):
+        pet.ui.sel_friend = action.split(":", 1)[1]
+        return
+    if action == "pal_add":
+        pet.ui.typing = {"title": "ADD PAL", "prompt": "Their 6-letter friend code", "buf": "", "field": "friend_code"}
+        return
+    if action.startswith("pal_add:"):
+        _pal_add_code(pet, action.split(":", 1)[1])
+        return
+    if action.startswith("pal_drop:"):
+        drop_friend(pet.save, action.split(":", 1)[1])
+        pet.persist()
+        pet.ui.say("DROPPED")
+        return
+    if action.startswith("pal_gift:"):
+        _pal_gift(pet, action.split(":", 1)[1])
+        return
+    if action.startswith("pal_visit:"):
+        _pal_visit(pet, action.split(":", 1)[1])
+        return
+    if action.startswith("pal_snack:"):
+        _pal_snack(pet, action.split(":", 1)[1])
+        return
+    if action.startswith("pal_cheer:"):
+        _pal_cheer(pet, action.split(":", 1)[1])
+        return
+    if action.startswith("pal_hunt:"):
+        _pal_hunt(pet, action.split(":", 1)[1])
+        return
+    if action.startswith("pal_note:"):
+        pet.ui.sel_friend = action.split(":", 1)[1]
+        pet.ui.typing = {"title": "NOTE", "prompt": "Private note to that pal", "buf": "", "field": "whisper"}
         return
     if action == "swap":
         pet.picker = True
@@ -192,6 +286,12 @@ def handle(pet, action: str) -> None:
         return
     if action.startswith("use:"):
         _fight_use(pet, action.split(":", 1)[1])
+        return
+    if action == "fight_guard":
+        _fight_use(pet, "guard")
+        return
+    if action == "fight_focus":
+        _fight_use(pet, "focus")
         return
     if action == "crest":
         pet.ui.crest_i = (pet.ui.crest_i + 1) % len(CLAN_CRESTS)
@@ -244,7 +344,7 @@ def handle(pet, action: str) -> None:
         pet.ui.mode = "together"
         return
     if action == "mail_team":
-        pet.ui.together_view = "team"
+        pet.ui.together_view = "pals"
         return
     if action == "mail_write":
         pet.ui.typing = {"title": "MAIL", "prompt": "Message the LAN", "buf": "", "field": "chat"}
@@ -296,7 +396,13 @@ def _key(pet, ch: str) -> None:
     if not t:
         return
     buf = str(t.get("buf") or "")
-    lim = 40 if t.get("field") == "chat" else 16
+    field = t.get("field")
+    if field in ("chat", "whisper"):
+        lim = 40
+    elif field == "friend_code":
+        lim = 6
+    else:
+        lim = 16
     if ch == "del":
         t["buf"] = buf[:-1]
         return
@@ -323,6 +429,10 @@ def _key(pet, ch: str) -> None:
             _clan_join_code(pet, val[:16])
         elif field == "chat":
             _send_chat(pet, val)
+        elif field == "whisper":
+            _send_whisper(pet, val)
+        elif field == "friend_code":
+            _pal_add_code(pet, val)
         return
     if len(ch) == 1:
         t["buf"] = (buf + ch)[:lim]
@@ -701,7 +811,7 @@ def _unequip(pet, slot: int) -> None:
     pet.persist()
 
 
-def _fight_start(pet) -> None:
+def _fight_start(pet, foe=None, hunt: bool = False, hunt_pal: str = "") -> None:
     if pet.form() in EGGS:
         pet.ui.say("TOO SMALL")
         return
@@ -710,21 +820,35 @@ def _fight_start(pet) -> None:
         pet.ui.say("TOO HUNGRY")
         return
     st = combat_stats(p, p["stage_i"])
-    e = pick_enemy(pet.ln()["tag"], p["stage_i"], p["strength"])
+    e = foe or scale_foe(pick_enemy(pet.ln()["tag"], p["stage_i"], p["strength"]), p)
     pet.ui.fight = {
         "eid": e["id"],
         "php": st["hp"],
-        "ehp": int(e["hp"]),
         "pmax": st["hp"],
-        "emax": int(e["hp"]),
         "over": False,
-        "status": "",
-        "log": f"VS {e['name'].upper()}  weak {e.get('weak', '-')}",
+        "log": "",
+        "hunt": bool(hunt),
+        "hunt_pal": hunt_pal or "",
     }
+    seed_battle(pet.ui.fight, e)
+    pet.ui.fight["log"] = f"VS {e['name'].upper()}  weak {e.get('weak', '-')}  {str(pet.ui.fight.get('intent') or 'jab').upper()} IN"
     pet.ui.say(f"VS {e['name'].upper()}")
     pet.panel_open = False
     pet.begin_desktop_fight("wild", e)
     pet.set_anim("train", 0.6)
+
+
+def _fight_move(pet, mid: str) -> tuple[str, dict | None, int]:
+    if mid in ("guard", "focus"):
+        return mid, None, 1
+    p = pet.p()
+    if mid == "struggle":
+        return "move", {"name": "Struggle", "typ": "strike", "pow": 8, "grow": 0}, 1
+    mv = move_by_id(pet.save["current"], mid)
+    lv = int((p.get("moves") or {}).get(mid, 0))
+    if not mv or lv <= 0:
+        return "", None, 0
+    return "move", mv, lv
 
 
 def _fight_use(pet, mid: str) -> None:
@@ -732,50 +856,38 @@ def _fight_use(pet, mid: str) -> None:
     if not f or f.get("over"):
         return
     p = pet.p()
-    e = ENEMY_BY_ID.get(f["eid"])
+    e = f.get("foe") or ENEMY_BY_ID.get(f.get("eid") or "")
     if not e:
         return
-    if mid == "struggle":
-        mv = {"name": "Struggle", "typ": "strike", "pow": 8, "grow": 0}
-        lv = 1
-    else:
-        mv = move_by_id(pet.save["current"], mid)
-        lv = int((p.get("moves") or {}).get(mid, 0))
-        if not mv or lv <= 0:
-            pet.ui.say("NO MOVE")
-            return
+    action, mv, lv = _fight_move(pet, mid)
+    if not action:
+        pet.ui.say("NO MOVE")
+        return
     stats = combat_stats(p, p["stage_i"])
-    hit = roll_hit(mv, lv, stats, e)
     buffs = pet.save.setdefault("buffs", {})
-    if int(buffs.get("chip") or 0) > 0 and not hit["miss"]:
-        hit["dmg"] = int(hit["dmg"] * 1.28)
+    dmg_mult = 1.0
+    if action == "move" and int(buffs.get("chip") or 0) > 0:
+        dmg_mult = 1.28
         buffs["chip"] -= 1
-    p["hunger"] = max(0, p["hunger"] - 3)
-    if hit["miss"]:
-        f["log"] = f"{mv['name'].upper()}  MISS"
-    else:
-        f["ehp"] = max(0, f["ehp"] - hit["dmg"])
-        tag = " CRIT" if hit["crit"] else ""
-        if hit["status"]:
-            f["status"] = hit["status"]
-            tag += f" {hit['status'].upper()}"
-        f["log"] = f"{mv['name'].upper()}  {hit['dmg']}{tag}"
-    if f["ehp"] <= 0:
-        pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""))
+    out = play_turn(f, action, mv, lv, stats, dmg_mult=dmg_mult)
+    if out.get("blocked"):
+        if dmg_mult > 1:
+            buffs["chip"] = int(buffs.get("chip") or 0) + 1
+        pet.ui.say("TOO HOT")
+        f["log"] = str(out.get("log") or "TOO HOT")
+        return
+    p["hunger"] = max(0, p["hunger"] - (1 if action != "move" else 3))
+    label = str((mv or {}).get("name") or action.upper())
+    typ = str(out.get("typ") or (mv or {}).get("typ") or "strike")
+    counter = out.get("counter")
+    if counter:
+        counter = {**counter, "typ": blast_typ_for_enemy(e)}
+    if out.get("killed"):
+        pet.play_blast(typ, dmg=int(out.get("dmg") or 0), crit=bool(out.get("crit")), miss=bool(out.get("miss")), label=label)
         _fight_win(pet, e)
         return
-    if f.get("status") == "burn":
-        f["ehp"] = max(0, f["ehp"] - 3)
-    dmg_in = enemy_hit(e, stats, f.get("status") or "")
-    counter = None
-    if dmg_in <= 0:
-        f["log"] += "  STUNNED"
-    else:
-        f["php"] = max(0, f["php"] - dmg_in)
-        f["log"] += f"  /  {e['name']} {dmg_in}"
-        counter = {"typ": blast_typ_for_enemy(e), "dmg": int(dmg_in), "label": e["name"]}
-    pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""), counter=counter)
-    if f["php"] <= 0:
+    pet.play_blast(typ, dmg=0 if out.get("miss") else int(out.get("dmg") or 0), crit=bool(out.get("crit")), miss=bool(out.get("miss")), label=label, counter=counter)
+    if out.get("wiped"):
         _fight_lose(pet, e)
         return
     pet.persist()
@@ -811,6 +923,14 @@ def _fight_win(pet, e: dict) -> None:
         f["log"] = f"WIN  +${loot}  {drop['name']}"
         pet.ui.say(f"LOOT {drop['name'].upper()}")
         pet.pop(drop["name"].upper(), (180, 220, 255))
+    if f.get("hunt"):
+        extra = 80
+        pet.save["coins"] = int(pet.save.get("coins") or 0) + extra
+        code = normalize_code(str(f.get("hunt_pal") or ""))
+        if code:
+            _pal_send(pet, code, {"t": "hunt_win", "boss": e.get("id"), **_me_card(pet)})
+        pet.flash("HUNT WIN")
+        pet.pop("HUNT +$80", (255, 220, 80))
     pet.set_anim("happy", 1.2)
     pet.combat_over_at = time.time()
     pet.persist()
@@ -1186,6 +1306,48 @@ def net_event(pet, ev: dict) -> None:
             st["won"] = bool(ev.get("won"))
             st["log"] = "RAID CLEAR" if ev.get("won") else "RAID WIPE"
         return
+    if kind == "buddy":
+        pet.ui.pending_buddy = ev
+        pet.flash(f"PAL {ev.get('from_name', '?')}")
+        pet.ui.say("PAL REQUEST")
+        return
+    if kind == "buddy_ok":
+        card = ev.get("card") or {}
+        card["id"] = card.get("id") or ev.get("from_pid") or ev.get("pid")
+        if card.get("id"):
+            upsert_friend(pet.save, card)
+            pet.persist()
+        pet.ui.say("THEY SAID YES")
+        pet.flash("NEW PAL")
+        return
+    if kind == "buddy_no":
+        pet.ui.say("THEY SAID NO")
+        return
+    if kind == "gift":
+        coins = max(0, int(ev.get("coins") or 0))
+        pet.save["coins"] = int(pet.save.get("coins") or 0) + coins
+        item = str(ev.get("item") or "")
+        if item:
+            give_item(pet, item, 1)
+        add_bond(pet.save, str(ev.get("from_pid") or ""), 1)
+        pet.persist()
+        pet.flash(f"GIFT {ev.get('from_name', '?')}")
+        pet.pop(f"+${coins}" if coins else "GIFT", (255, 220, 80))
+        return
+    if kind == "visit":
+        p = pet.p()
+        p["mood"] = min(100, p["mood"] + 6)
+        pet.save["coins"] = int(pet.save.get("coins") or 0) + 8
+        add_bond(pet.save, str(ev.get("from_pid") or ""), 1)
+        pet.persist()
+        pet.flash(f"VISIT {ev.get('from_name', '?')}")
+        pet.pop("VISITOR", (180, 220, 255))
+        pet.set_anim("happy", 1.0)
+        return
+    if kind == "whisper":
+        _push_mail(pet, str(ev.get("from_name") or "?"), str(ev.get("text") or ""))
+        pet.flash(f"NOTE {ev.get('from_name', '?')}")
+        return
 
 
 def give_item(pet, iid: str, n: int = 1) -> None:
@@ -1323,6 +1485,347 @@ def _send_chat(pet, text: str) -> None:
     pet.ui.say("SENT")
 
 
+def _yard_up(pet, slot: str) -> None:
+    err = buy_yard(pet.save, slot)
+    if err == "MAXED":
+        pet.ui.say("MAXED")
+        return
+    if err == "BROKE":
+        pet.ui.say("BROKE")
+        return
+    pet.quest_tick("shop")
+    pet.persist()
+    pet.ui.say(f"{slot.upper()} UP")
+    pet.pop(slot.upper(), (180, 220, 120))
+
+
+def _me_card(pet) -> dict:
+    return {
+        "id": my_code(pet.save),
+        "code": my_code(pet.save),
+        "name": pet.save.get("player_name") or "Trainer",
+        "main": pet.save.get("main") or pet.save.get("current"),
+    }
+
+
+def _pal_send(pet, code: str, payload: dict) -> bool:
+    pals = getattr(pet, "pals", None)
+    if not pals:
+        return False
+    pals.watch(code)
+    return pals.send(code, payload)
+
+
+def _pal_add_code(pet, raw: str) -> None:
+    code = normalize_code(raw)
+    mine = my_code(pet.save)
+    if len(code) != 6:
+        pet.ui.say("NEED 6 LETTERS")
+        return
+    if code == mine:
+        pet.ui.say("THAT IS YOU")
+        return
+    if is_friend(pet.save, code):
+        pet.ui.say("ALREADY")
+        return
+    upsert_friend(pet.save, {"code": code, "id": code, "name": code})
+    _pal_send(pet, code, {"t": "add", **_me_card(pet)})
+    pet.persist()
+    pet.ui.sel_friend = code
+    pet.ui.say(f"ADDED {code}")
+    pet.pop("PAL ADDED", (180, 220, 255))
+
+
+def _buddy_yes(pet) -> None:
+    ev = pet.ui.pending_buddy
+    if not ev:
+        return
+    code = normalize_code(ev.get("code") or ev.get("from") or ev.get("from_pid") or "")
+    card = {"id": code or ev.get("from_pid"), "code": code, "name": ev.get("from_name"), "main": ev.get("main")}
+    upsert_friend(pet.save, card)
+    if code:
+        _pal_send(pet, code, {"t": "add_ok", **_me_card(pet)})
+    pet.ui.pending_buddy = None
+    pet.persist()
+    pet.ui.say(f"PAL {str(card.get('name') or code or '').upper()}")
+    pet.pop("NEW PAL", (180, 220, 255))
+
+
+def _buddy_no(pet) -> None:
+    ev = pet.ui.pending_buddy
+    code = normalize_code((ev or {}).get("from") or (ev or {}).get("code") or "")
+    if code:
+        _pal_send(pet, code, {"t": "add_no", **_me_card(pet)})
+    pet.ui.pending_buddy = None
+    pet.ui.say("NO PAL")
+
+
+def _pal_gift(pet, pid: str) -> None:
+    pal = friend_of(pet.save, pid)
+    code = normalize_code((pal or {}).get("code") or pid)
+    if not pal or len(code) != 6:
+        pet.ui.say("NO PAL")
+        return
+    now = time.time()
+    if now - float(pal.get("last_gift") or 0) < GIFT_CD:
+        pet.ui.say("TOO SOON")
+        return
+    coins = int(pet.save.get("coins") or 0)
+    if coins < GIFT_COINS:
+        pet.ui.say("BROKE")
+        return
+    pet.save["coins"] = coins - GIFT_COINS
+    pal["last_gift"] = now
+    add_bond(pet.save, code, 1)
+    if not _pal_send(pet, code, {"t": "gift", "coins": GIFT_COINS, "item": "", **_me_card(pet)}):
+        pet.save["coins"] = coins
+        pet.ui.say("NET DOWN")
+        return
+    pet.persist()
+    pet.ui.say(f"SENT ${GIFT_COINS}")
+    pet.pop("GIFT", (255, 220, 80))
+
+
+def _pal_visit(pet, pid: str) -> None:
+    pal = friend_of(pet.save, pid)
+    code = normalize_code((pal or {}).get("code") or pid)
+    if not pal or len(code) != 6:
+        pet.ui.say("NO PAL")
+        return
+    now = time.time()
+    if now - float(pal.get("last_visit") or 0) < VISIT_CD:
+        pet.ui.say("TOO SOON")
+        return
+    pal["last_visit"] = now
+    add_bond(pet.save, code, 1)
+    p = pet.p()
+    p["mood"] = min(100, p["mood"] + 6)
+    pet.save["coins"] = int(pet.save.get("coins") or 0) + 12
+    if not _pal_send(pet, code, {"t": "visit", "yard": yard_score(pet.save), **_me_card(pet)}):
+        pet.ui.say("NET DOWN")
+        return
+    pet.persist()
+    pet.ui.say("VISITING")
+    pet.pop("VISIT", (180, 220, 255))
+    pet.set_anim("happy", 1.0)
+
+
+def _send_whisper(pet, text: str) -> None:
+    text = (text or "").strip()
+    pid = getattr(pet.ui, "sel_friend", None)
+    pal = friend_of(pet.save, pid) if pid else None
+    code = normalize_code((pal or {}).get("code") or pid or "")
+    if not text:
+        pet.ui.say("EMPTY")
+        return
+    if not pal or len(code) != 6:
+        pet.ui.say("PICK A PAL")
+        return
+    name = pet.save.get("player_name") or "Trainer"
+    if not _pal_send(pet, code, {"t": "whisper", "text": text, **_me_card(pet)}):
+        pet.ui.say("NET DOWN")
+        return
+    _push_mail(pet, f"{name} >", text)
+    add_bond(pet.save, code, 1)
+    pet.persist()
+    pet.ui.together_view = "mail"
+    pet.ui.say("NOTE SENT")
+
+
+def _pal_ready(pet, pid: str):
+    pal = friend_of(pet.save, pid)
+    code = normalize_code((pal or {}).get("code") or pid)
+    if not pal or len(code) != 6:
+        pet.ui.say("NO PAL")
+        return None, ""
+    return pal, code
+
+
+def _pal_snack(pet, pid: str) -> None:
+    pal, code = _pal_ready(pet, pid)
+    if not pal:
+        return
+    now = time.time()
+    if now - float(pal.get("last_snack") or 0) < SNACK_CD:
+        pet.ui.say("TOO SOON")
+        return
+    bag = pet.save.setdefault("bag", {})
+    foods = [iid for iid in bag if ITEM_BY_ID.get(iid, {}).get("kind") == "food" and int(bag.get(iid) or 0) > 0]
+    if not foods:
+        pet.ui.say("NO FOOD")
+        return
+    iid = random.choice(foods)
+    bag[iid] = int(bag[iid]) - 1
+    if bag[iid] <= 0:
+        bag.pop(iid, None)
+    pal["last_snack"] = now
+    add_bond(pet.save, code, 1)
+    if not _pal_send(pet, code, {"t": "snack", "item": iid, **_me_card(pet)}):
+        give_item(pet, iid, 1)
+        pet.ui.say("NET DOWN")
+        return
+    pet.persist()
+    name = ITEM_BY_ID.get(iid, {}).get("name", iid)
+    pet.ui.say(f"SENT {name.upper()}")
+    pet.pop("SNACK", (255, 200, 80))
+
+
+def _pal_cheer(pet, pid: str) -> None:
+    pal, code = _pal_ready(pet, pid)
+    if not pal:
+        return
+    now = time.time()
+    if now - float(pal.get("last_cheer") or 0) < CHEER_CD:
+        pet.ui.say("TOO SOON")
+        return
+    pal["last_cheer"] = now
+    p = pet.p()
+    p["mood"] = min(100, p["mood"] + 10)
+    add_bond(pet.save, code, 1)
+    if not _pal_send(pet, code, {"t": "cheer", **_me_card(pet)}):
+        pet.ui.say("NET DOWN")
+        return
+    pet.persist()
+    pet.ui.say("CHEER")
+    pet.pop("CHEER", (180, 220, 255))
+    pet.set_anim("happy", 0.8)
+
+
+def _pal_hunt(pet, pid: str) -> None:
+    pal, code = _pal_ready(pet, pid)
+    if not pal:
+        return
+    now = time.time()
+    if now - float(pal.get("last_hunt") or 0) < HUNT_CD:
+        pet.ui.say("TOO SOON")
+        return
+    if pet.form() in EGGS:
+        pet.ui.say("TOO SMALL")
+        return
+    p = pet.p()
+    if p["hunger"] < 16:
+        pet.ui.say("TOO HUNGRY")
+        return
+    boss = dict(pick_raid_boss())
+    pal["last_hunt"] = now
+    add_bond(pet.save, code, 1)
+    if not _pal_send(pet, code, {"t": "hunt", "boss": boss["id"], **_me_card(pet)}):
+        pet.ui.say("NET DOWN")
+        return
+    pet.persist()
+    pet.ui.say(f"HUNT {boss['name'].upper()}")
+    pet.pop("HUNT", (255, 160, 80))
+    _fight_start(pet, scale_foe(boss, p), hunt=True, hunt_pal=code)
+
+
+def _hunt_yes(pet) -> None:
+    ev = pet.ui.pending_hunt
+    pet.ui.pending_hunt = None
+    if not ev:
+        return
+    bid = str(ev.get("boss") or "")
+    boss = next((dict(b) for b in RAID_BOSSES if b["id"] == bid), None)
+    if not boss:
+        boss = dict(pick_raid_boss())
+    code = normalize_code(str(ev.get("from") or ev.get("code") or ""))
+    p = pet.p()
+    _fight_start(pet, scale_foe(boss, p), hunt=True, hunt_pal=code)
+
+
+def pal_event(pet, ev: dict) -> None:
+    kind = ev.get("t")
+    src = normalize_code(str(ev.get("from") or ev.get("code") or ""))
+    if src and src == my_code(pet.save):
+        return
+    if kind == "hello" and src:
+        if is_friend(pet.save, src):
+            upsert_friend(pet.save, ev)
+            pet.persist()
+        return
+    if kind == "add" and src:
+        if is_friend(pet.save, src):
+            upsert_friend(pet.save, ev)
+            _pal_send(pet, src, {"t": "add_ok", **_me_card(pet)})
+            pet.persist()
+            return
+        pet.ui.pending_buddy = ev
+        pet.flash(f"PAL {ev.get('from_name') or src}")
+        pet.ui.say("PAL REQUEST")
+        return
+    if kind == "add_ok" and src:
+        upsert_friend(pet.save, ev)
+        pet.persist()
+        pet.ui.say("THEY SAID YES")
+        pet.flash("NEW PAL")
+        return
+    if kind == "add_no":
+        pet.ui.say("THEY SAID NO")
+        return
+    if kind == "gift":
+        coins = max(0, int(ev.get("coins") or 0))
+        pet.save["coins"] = int(pet.save.get("coins") or 0) + coins
+        item = str(ev.get("item") or "")
+        if item:
+            give_item(pet, item, 1)
+        if src:
+            add_bond(pet.save, src, 1)
+        pet.persist()
+        pet.flash(f"GIFT {ev.get('from_name') or src}")
+        pet.pop(f"+${coins}" if coins else "GIFT", (255, 220, 80))
+        return
+    if kind == "visit":
+        p = pet.p()
+        p["mood"] = min(100, p["mood"] + 6)
+        pet.save["coins"] = int(pet.save.get("coins") or 0) + 8
+        if src:
+            add_bond(pet.save, src, 1)
+        pet.persist()
+        pet.flash(f"VISIT {ev.get('from_name') or src}")
+        pet.pop("VISITOR", (180, 220, 255))
+        pet.set_anim("happy", 1.0)
+        return
+    if kind == "whisper":
+        _push_mail(pet, str(ev.get("from_name") or src or "?"), str(ev.get("text") or ""))
+        pet.flash(f"NOTE {ev.get('from_name') or src}")
+        return
+    if kind == "snack":
+        item = str(ev.get("item") or "")
+        if item:
+            give_item(pet, item, 1)
+        if src:
+            add_bond(pet.save, src, 1)
+        pet.persist()
+        name = ITEM_BY_ID.get(item, {}).get("name", "SNACK")
+        pet.flash(f"SNACK {ev.get('from_name') or src}")
+        pet.pop(str(name).upper(), (255, 200, 80))
+        return
+    if kind == "cheer":
+        p = pet.p()
+        p["mood"] = min(100, p["mood"] + 10)
+        if src:
+            add_bond(pet.save, src, 1)
+        pet.persist()
+        pet.flash(f"CHEER {ev.get('from_name') or src}")
+        pet.pop("CHEER", (180, 220, 255))
+        pet.set_anim("happy", 0.8)
+        return
+    if kind == "hunt" and src:
+        pet.ui.pending_hunt = ev
+        pet.flash(f"HUNT {ev.get('from_name') or src}")
+        pet.ui.say("HUNT REQUEST")
+        return
+    if kind == "hunt_win":
+        pet.save["coins"] = int(pet.save.get("coins") or 0) + 40
+        p = pet.p()
+        p["mood"] = min(100, p["mood"] + 6)
+        if src:
+            add_bond(pet.save, src, 1)
+        pet.persist()
+        pet.flash(f"HUNT WIN {ev.get('from_name') or src}")
+        pet.pop("HUNT +$40", (255, 220, 80))
+        return
+
+
 def _buy_gear(pet, aid: str) -> None:
     a = ATTACH_BY_ID.get(aid)
     if not a:
@@ -1395,15 +1898,14 @@ def _floor_spawn(pet) -> None:
         return
     p = pet.p()
     n = int(fl.get("n") or 1)
-    e = pick_enemy(pet.ln()["tag"], floor_band(n, p["stage_i"], p["strength"]), p["strength"])
-    e["hp"] = int(e["hp"] * (1.0 + 0.18 * (n - 1)))
-    fl["eid"] = e["id"]
-    fl["ename"] = e["name"]
-    fl["ehp"] = int(e["hp"])
-    fl["emax"] = int(e["hp"])
-    fl["status"] = ""
-    fl["clear"] = False
-    fl["log"] = f"FLOOR {n}  {e['name'].upper()}"
+    band = floor_band(n, p["stage_i"], p["strength"])
+    e = scale_foe(pick_enemy(pet.ln()["tag"], p["stage_i"], p["strength"], band=band), p, hp_mult=1.0 + 0.22 * (n - 1))
+    keep_php = int(fl.get("php") or 0)
+    pmax = int(fl.get("pmax") or keep_php)
+    fl.clear()
+    fl.update({"n": n, "php": keep_php, "pmax": pmax, "clear": False, "over": False})
+    seed_battle(fl, e)
+    fl["log"] = f"FLOOR {n}  {e['name'].upper()}  {str(fl.get('intent') or 'jab').upper()} IN"
     pet.ui.say(fl["log"])
     pet.panel_open = False
     pet.begin_desktop_fight("floor", e)
@@ -1429,30 +1931,27 @@ def _floor_use(pet, mid: str) -> None:
     if not fl or fl.get("over") or fl.get("clear"):
         return
     p = pet.p()
-    e = ENEMY_BY_ID.get(fl.get("eid"))
+    e = fl.get("foe") or ENEMY_BY_ID.get(fl.get("eid"))
     if not e:
         return
-    if mid == "struggle":
-        mv = {"name": "Struggle", "typ": "strike", "pow": 8, "grow": 0}
-        lv = 1
-    else:
-        mv = move_by_id(pet.save["current"], mid)
-        lv = int((p.get("moves") or {}).get(mid, 0))
-        if not mv or lv <= 0:
-            pet.ui.say("NO MOVE")
-            return
+    action, mv, lv = _fight_move(pet, mid)
+    if not action:
+        pet.ui.say("NO MOVE")
+        return
     stats = combat_stats(p, p["stage_i"])
-    hit = roll_hit(mv, lv, stats, e)
-    p["hunger"] = max(0, p["hunger"] - 2)
-    if hit["miss"]:
-        fl["log"] = "MISS"
-    else:
-        fl["ehp"] = max(0, fl["ehp"] - hit["dmg"])
-        if hit["status"]:
-            fl["status"] = hit["status"]
-        fl["log"] = f"{mv['name'].upper()} {hit['dmg']}" + (" CRIT" if hit["crit"] else "")
-    if fl["ehp"] <= 0:
-        pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""))
+    out = play_turn(fl, action, mv, lv, stats)
+    if out.get("blocked"):
+        pet.ui.say("TOO HOT")
+        fl["log"] = str(out.get("log") or "TOO HOT")
+        return
+    p["hunger"] = max(0, p["hunger"] - (1 if action != "move" else 2))
+    label = str((mv or {}).get("name") or action.upper())
+    typ = str(out.get("typ") or (mv or {}).get("typ") or "strike")
+    counter = out.get("counter")
+    if counter:
+        counter = {**counter, "typ": blast_typ_for_enemy(e)}
+    if out.get("killed"):
+        pet.play_blast(typ, dmg=int(out.get("dmg") or 0), crit=bool(out.get("crit")), miss=bool(out.get("miss")), label=label)
         loot = random.randint(8, 16) + int(fl.get("n") or 1) * 4
         pet.save["coins"] = int(pet.save.get("coins", 0)) + loot
         grant_xp(p, 10 + int(fl.get("n") or 1) * 6)
@@ -1470,14 +1969,8 @@ def _floor_use(pet, mid: str) -> None:
             pet.combat_over_at = time.time()
         pet.persist()
         return
-    dmg_in = enemy_hit(e, stats, fl.get("status") or "")
-    counter = None
-    fl["php"] = max(0, fl["php"] - dmg_in)
-    fl["log"] += f"  / {dmg_in}"
-    if dmg_in > 0:
-        counter = {"typ": blast_typ_for_enemy(e), "dmg": int(dmg_in), "label": str(e.get("name") or "HIT")}
-    pet.play_blast(str(mv.get("typ") or "strike"), dmg=0 if hit["miss"] else int(hit["dmg"]), crit=bool(hit.get("crit")), miss=bool(hit["miss"]), label=str(mv.get("name") or ""), counter=counter)
-    if fl["php"] <= 0:
+    pet.play_blast(typ, dmg=0 if out.get("miss") else int(out.get("dmg") or 0), crit=bool(out.get("crit")), miss=bool(out.get("miss")), label=label, counter=counter)
+    if out.get("wiped"):
         fl["over"] = True
         pet.save["streak"] = 0
         pet.ui.say("DUNGEON WIPE")

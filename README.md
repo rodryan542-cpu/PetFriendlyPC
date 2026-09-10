@@ -42,10 +42,10 @@ The pet walks alone. The **pad** stays put — drag it. MENU opens the house.
 | FEED / TRN / PLAY | Hunger, strength, mood. Cooldowns are real. |
 | FIGHT | Wild scrap, dungeon, or raid. Eggs use RUN instead. |
 | HATCH | Hatch Lab. Care, tools, desktop run. |
-| SHOP | 50 bag items + 20 pieces of gear. |
+| SHOP | 119 bag items + 36 pieces of gear. |
 | GO | Send them out. Money, snacks, sometimes an ambush. |
 | BED / WASH | Sleep. Shower. They get dirty if you ignore hygiene. |
-| SWAP | Page the 32 lines. You only *own* what you paid for. |
+| SWAP | Page the 68 lines. You only *own* what you paid for. |
 
 First boot you pick **one** line. That one is yours. The rest wait behind the $2.5M wall.
 
@@ -53,7 +53,7 @@ First boot you pick **one** line. That one is yours. The rest wait behind the $2
   <img src="docs/friends.png" alt="Bunny, frog, cat, puppy, Kirby, Agumon" width="900">
 </p>
 
-32 partners across animals and fan faces (Digimon, Pokémon, Nintendo, and a pile of other tags). Stages are egg → baby → the thing you actually wanted. Wait times start at **6 hours** and go up. Strength, feeds, and trains also have to be there or the shell will not crack.
+68 partners across original lines, animals, and fan faces (Digimon, Pokémon, Nintendo, and a pile of other tags). Stages are egg → baby → the thing you actually wanted. Wait times start at **6 hours** and go up. Strength, feeds, and trains also have to be there or the shell will not crack.
 
 ## Hatch Lab
 
@@ -98,11 +98,11 @@ The other guy walks onto monitor 2. You hit a move on the pad. A **blast** of th
 - **Moves** — buy them in DOJO, equip **four**, upgrade them. Empty loadout is Struggle and it is sad.
 - **Gear** — head / back / held / feet. Visors, wings, lanterns, toe claws. Every line can wear the same slots.
 
-Shop meat is $500 after the grind multiplier. Deluxe steak, ramen, skill chips, smoke bombs — fifty bag items, all painted, all too expensive on purpose.
+Shop meat is $500 after the grind multiplier. Deluxe steak, ramen, skill chips, smoke bombs — a hundred-plus bag items, all painted, all too expensive on purpose.
 
-## Multiplayer (LAN)
+## Multiplayer (LAN + pals)
 
-No cloud. No login. Both PCs on the same network, both running PetFriendlyPC. It beacons over **UDP 47832**. Nearby names show up on TEAM.
+No login wall. On the same Wi-Fi, it beacons over **UDP 47832**. Nearby names show up on TEAM. Pals work off the LAN too: your name plus a 6-letter friend code. Snack, cheer, or hunt with someone who has your code.
 
 <p align="center">
   <img src="docs/lan.png" alt="Two pets facing off over LAN" width="900">
@@ -118,7 +118,7 @@ No cloud. No login. Both PCs on the same network, both running PetFriendlyPC. It
 
 **Raid queue** — queue up, someone hits start, up to four of you share the boss. Allies keep hitting while you pick moves.
 
-If Windows Firewall asks, allow it on private LAN. It is not talking to the internet.
+If Windows Firewall asks, allow it on private LAN. Clan traffic stays on the LAN. Friend-code pals use a public MQTT broker.
 
 ## Why the grind
 

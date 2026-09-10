@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from depth import RUN_OBS, combat_stats
+from depth import RUN_OBS, combat_stats, scale_foe, seed_battle
 from game_data import ENEMY_BY_ID, LINE_NAME, move_by_id, pick_enemy
 
 from paths import asset_root
@@ -227,22 +227,21 @@ def raid_hits(st: dict, pet) -> list:
 
 def start_raid_wave(pet, st: dict) -> None:
     stats = combat_stats(pet.p(), pet.p()["stage_i"])
-    st["php"] = stats["hp"]
-    st["pmax"] = stats["hp"]
+    if int(st.get("pmax") or 0) <= 1:
+        st["php"] = stats["hp"]
+        st["pmax"] = stats["hp"]
     if st["wave"] >= 3:
-        b = st["boss"]
-        st["enemy"] = dict(b)
-        st["ehp"] = int(b["hp"])
-        st["emax"] = int(b["hp"])
-        st["log"] = f"BOSS  {b['name'].upper()}"
+        b = scale_foe(dict(st["boss"]), pet.p(), hp_mult=1.18)
+        seed_battle(st, b)
+        st["enemy"] = b
+        st["log"] = f"BOSS  {b['name'].upper()}  {str(st.get('intent') or 'jab').upper()} IN"
         return
     spec = st["waves"][st["wave"]]
-    e = pick_enemy(spec["tag"], spec["band"], pet.p().get("strength") or 0)
-    e["hp"] = int(e["hp"] * (1.15 + st["wave"] * 0.2))
+    e = pick_enemy(spec["tag"], spec["band"], pet.p().get("strength") or 0, band=int(spec.get("band") or 1))
+    e = scale_foe(e, pet.p(), hp_mult=1.12 + int(st.get("wave") or 0) * 0.2)
+    seed_battle(st, e)
     st["enemy"] = e
-    st["ehp"] = int(e["hp"])
-    st["emax"] = int(e["hp"])
-    st["log"] = f"WAVE {st['wave'] + 1}  {e['name'].upper()}"
+    st["log"] = f"WAVE {st['wave'] + 1}  {e['name'].upper()}  {str(st.get('intent') or 'jab').upper()} IN"
 
 
 def render_raid(pet, st: dict) -> Image.Image:
@@ -283,7 +282,7 @@ def render_raid(pet, st: dict) -> Image.Image:
     d.rectangle((FIELD_W - 420, 548, FIELD_W - 160, 568), outline=(232, 188, 72))
     d.rectangle((FIELD_W - 418, 550, FIELD_W - 418 + int(256 * ehp / emax), 566), fill=(214, 72, 64))
     wave_lab = "BOSS" if st.get("wave", 0) >= 3 else f"WAVE {int(st.get('wave') or 0) + 1}/3"
-    d.text((FIELD_W - 420, 572), f"{wave_lab}  {ehp}/{emax}", font=F_SM, fill=(236, 228, 210))
+    d.text((FIELD_W - 420, 572), f"{wave_lab}  {ehp}/{emax}  {str(st.get('intent') or 'jab').upper()}", font=F_SM, fill=(236, 228, 210))
     if st.get("over"):
         msg = "RAID CLEAR" if st.get("won") else "RAID WIPE"
         d.rectangle((700, 240, 1220, 400), fill=(12, 10, 16), outline=(232, 188, 72), width=3)
